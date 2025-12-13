@@ -21,6 +21,7 @@ from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
 from utils.llm_helpers import call_llm_with_prompt
+from utils.llm_json_parser import LLMJsonParser
 
 if TYPE_CHECKING:
     from langchain_core.messages import AIMessage, AnyMessage, BaseMessage
@@ -109,6 +110,9 @@ class WorkflowBase(ABC):
         self._fail_fast: bool = fail_fast
         self._error_logging: bool = error_logging
         self._debug_logging: bool = debug_logging
+
+        # Initialize JSON parser for parsing LLM responses.
+        self._llm_json_parser: LLMJsonParser = LLMJsonParser()
 
         self._graph: CompiledStateGraph = self._build_graph()
 

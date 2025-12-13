@@ -58,6 +58,8 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 4. **Utilities:**
    - LLM helpers: `utils/llm_helpers.py` (call_llm_with_prompt function - already exists)
    - Dynamic loading: `utils/dynamic_loading.py` (module loading utilities - already exists)
+   - JSON parser: `utils/llm_json_parser.py` (LLMJsonParser class for parsing LLM JSON responses - already exists)
+   - JSON helpers: `utils/json_helpers.py` (is_valid_json function - already exists)
 
 5. **Demo Notebook:**
    - File: `notebooks/demo.ipynb` (Jupyter notebook for demonstration)
@@ -88,10 +90,18 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 3. **LangGraph Workflow Pattern:**
    - Use `WorkflowBase` from `coding_agent/base.py` as base class
-   - Extend `AnnotationState` for workflow state management
+   - Use `AnnotationState` for workflow state management (no custom state class needed)
+   - Custom data stored in `state["node_output"]` as a dict (e.g., `state["node_output"]["error_clusters"]`)
    - Nodes: REASON → PLAN → ACT → VALIDATE
    - Conditional edge from VALIDATE: success → END, retry → PLAN, failure → END (safety valve)
-   - State contains: error_queue_path, error_clusters, selected_clusters, generated_cluster_modules, generated_test_files, test_results, retry_count
+   - Node methods signature: `def _node_<name>(self, state: AnnotationState) -> AnnotationState:`
+   - Access state: `state["node_output"]` (dict), `state["messages"]`, `state["final_output"]`
+   - Update state: Modify `state["node_output"]` dict, call `self._update_state(state, messages=[...], node_output=node_output)` or set directly, return state
+   - JSON parsing: Use `self._llm_json_parser.parse_llm_json_extraction_response()` (available from WorkflowBase)
+   - Prompts: Access via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair with .system_prompt and .user_prompt)
+   - LLM calls: Use `self._call_llm_with_prompt(node_name="...", system_prompt=..., user_prompt=..., schema=None)`
+   - Initial state: `AnnotationState(messages=[], node_output=None, final_output=None)` - pass to `workflow.run(initial_state=...)`
+   - Thread ID: Generate unique ID (e.g., `f"coding_agent_{uuid.uuid4().hex[:8]}"` or timestamp-based) - required for WorkflowBase.__init__()
 
 4. **Error Queue Format:**
    - JSONL format (one JSON object per line)
@@ -208,6 +218,8 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Add function: `build_node_prompts(error_queue_contents: str, cluster_analysis: str, existing_modules: str, code_plan: str) -> NodePrompts`
        - Function formats templates and creates SystemAndUserPromptPair instances
        - Returns NodePrompts with reason, plan, act prompts populated
+       - Note: This function is called at workflow initialization to build NodePrompts, not in each node
+       - In nodes, access prompts via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair)
        - Test: Verify function creates valid NodePrompts object
 
 ### 5.0 Create CodingAgentWorkflow Class Structure [M]
@@ -215,75 +227,76 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    5.1 **Create CodingAgentWorkflow class skeleton** [M]
        - File: `coding_agent/agent.py`
        - Extend `WorkflowBase` from `coding_agent.base`
-       - Implement `__init__()`: Accept error_queue_path, parsers_dir, tests_dir, llm configuration, prompts
-       - Store configuration as instance variables
+       - Implement `__init__()`: Accept error_queue_path, parsers_dir, tests_dir, llm configuration, prompts, thread_id
+       - Store configuration as instance variables (error_queue_path, parsers_dir, tests_dir)
+       - Call `super().__init__()` with node_llms, node_prompts, thread_id, and other WorkflowBase parameters
        - Import required dependencies: WorkflowBase, AnnotationState, NodeLLMs, NodePrompts, etc.
+       - Note: No custom state class needed - use `AnnotationState` and store custom data in `state["node_output"]` dict
        - Test: Verify class can be instantiated
 
-   5.2 **Create CodingAgentState class** [S]
+   5.2 **Implement _add_workflow_nodes_and_edges method** [M]
        - File: `coding_agent/agent.py`
-       - Extend `AnnotationState` from `coding_agent.base`
-       - Add custom fields: error_queue_path, parsers_dir, tests_dir, error_clusters, selected_clusters, existing_cluster_modules, generated_cluster_modules, generated_test_files, test_results, retry_count
-       - Use Pydantic Field for type hints and defaults
-       - Test: Verify state class can be instantiated with initial values
-
-   5.3 **Implement _add_workflow_nodes_and_edges method** [M]
-       - File: `coding_agent/agent.py`
-       - Add nodes: "reason", "plan", "act", "validate" (call respective node methods)
-       - Set entry point: "reason"
-       - Add sequential edges: reason → plan → act → validate
-       - Add conditional edge from validate: Use `_should_retry()` method
-       - Conditional outcomes: "success" → END, "retry" → "plan", "failure" → END
+       - Add nodes: `workflow.add_node("reason", self._reason_node)`, etc.
+       - Set entry point: `workflow.add_edge(START, "reason")`
+       - Add sequential edges: `workflow.add_edge("reason", "plan")`, `workflow.add_edge("plan", "act")`, `workflow.add_edge("act", "validate")`
+       - Add conditional edge from validate: `workflow.add_conditional_edges("validate", self._should_retry, {"success": END, "retry": "plan", "failure": END})`
+       - Note: `_should_retry()` method should return "success", "retry", or "failure" based on test results and retry count
        - Test: Verify workflow graph structure is correct
 
 ### 6.0 Implement REASON Node [M]
 
    6.1 **Implement _reason_node method** [M]
        - File: `coding_agent/agent.py`
-       - Read error queue using `coding_agent.error_queue.read_error_queue()`
+       - Method signature: `def _reason_node(self, state: AnnotationState) -> AnnotationState:`
+       - Read error queue using `coding_agent.error_queue.read_error_queue(self._error_queue_path)`
        - Format error queue contents as JSONL string for prompt
-       - Build prompts using `build_node_prompts()` with error_queue_contents
-       - Call LLM using `_call_llm_with_prompt()` (from WorkflowBase) with reason node prompts
-       - Parse JSON response from LLM (schema=None, so parse from text)
-       - Extract clusters and selected_clusters from response
-       - Update state with error_clusters and selected_clusters
+       - Get prompts: `system_and_user_prompt_pair = self._node_prompts.reason`
+       - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt`
+       - Format user prompt: `user_prompt = system_and_user_prompt_pair.user_prompt.format(error_queue_contents=...)`
+       - Call LLM: `response = self._call_llm_with_prompt(node_name="reason", system_prompt=..., user_prompt=..., schema=None)`
+       - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(response.content, fail_fast=self._fail_fast, context_identifier=("Node", "reason"), debug_logging=self._debug_logging)`
+       - Extract first dict from parsed list (or handle dict directly): `parsed_data = parsed_list[0] if parsed_list else {}`
+       - Extract clusters and selected_clusters from parsed_data
+       - Update state: `node_output = state["node_output"] or {}`, set `node_output["error_clusters"]` and `node_output["selected_clusters"]`
+       - Call `self._update_state(state, messages=[...], node_output=node_output)` or update directly
        - Return updated state
        - Test: Verify REASON node clusters errors correctly with mock LLM response
-
-   6.2 **Add JSON parsing helper for LLM responses** [S]
-       - File: `coding_agent/agent.py`
-       - Add function: `_parse_json_response(response: AIMessage) -> dict`
-       - Handle JSON extraction from text (may be wrapped in markdown code blocks)
-       - Handle parsing errors gracefully
-       - Test: Verify function parses JSON from various LLM response formats
 
 ### 7.0 Implement PLAN Node [M]
 
    7.1 **Implement _plan_node method** [M]
        - File: `coding_agent/agent.py`
-       - Read existing cluster modules from parsers_dir (if any exist)
-       - Format cluster_analysis from state (selected clusters from REASON node)
-       - Format existing_cluster_modules list (module names and brief descriptions)
-       - Build prompts using `build_node_prompts()` with cluster_analysis and existing_modules
-       - Call LLM using `_call_llm_with_prompt()` with plan node prompts
-       - Parse JSON response (code plan with cluster_plans array)
-       - Update state with code_plan
-       - Return updated state
+       - Method signature: `def _plan_node(self, state: AnnotationState) -> AnnotationState:`
+       - Read existing cluster modules from parsers_dir: List `.py` files, read each file, extract brief description
+       - Format cluster_analysis from state: `cluster_analysis = json.dumps(state["node_output"]["selected_clusters"], indent=2)`
+       - Format existing_cluster_modules list: Create list of dicts with module name and description
+       - Get prompts: `system_and_user_prompt_pair = self._node_prompts.plan`
+       - Format user prompt: `user_prompt = system_and_user_prompt_pair.user_prompt.format(cluster_analysis=..., existing_modules=...)`
+       - Call LLM: `response = self._call_llm_with_prompt(node_name="plan", system_prompt=..., user_prompt=..., schema=None)`
+       - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(...)` as in REASON node
+       - Extract code_plan from parsed response (should be a dict with cluster_plans array)
+       - Update state: `node_output = state["node_output"] or {}`, set `node_output["code_plan"] = code_plan`
+       - Update state and return
        - Test: Verify PLAN node creates code plans correctly with mock LLM response
 
 ### 8.0 Implement ACT Node [M]
 
    8.1 **Implement _act_node method** [M]
        - File: `coding_agent/agent.py`
-       - Get code_plan from state
-       - Build prompts using `build_node_prompts()` with code_plan
-       - Call LLM using `_call_llm_with_prompt()` with act node prompts
-       - Parse JSON response (cluster_modules and test_files dictionaries)
-       - Write cluster module files to `parsers/<cluster_id>.py`
-       - Write test files to `tests/test_<cluster_id>.py`
-       - Use file locking (fcntl) when writing files to prevent race conditions
-       - Update state with generated_cluster_modules and generated_test_files
-       - Return updated state
+       - Method signature: `def _act_node(self, state: AnnotationState) -> AnnotationState:`
+       - Get code_plan from state: `code_plan = state["node_output"]["code_plan"]`
+       - Format code_plan as JSON string: `code_plan_str = json.dumps(code_plan, indent=2)`
+       - Get prompts: `system_and_user_prompt_pair = self._node_prompts.act`
+       - Format user prompt: `user_prompt = system_and_user_prompt_pair.user_prompt.format(code_plan=code_plan_str)`
+       - Call LLM: `response = self._call_llm_with_prompt(node_name="act", system_prompt=..., user_prompt=..., schema=None)`
+       - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(...)` as in REASON node
+       - Extract cluster_modules and test_files dictionaries from parsed response
+       - Write cluster module files: For each cluster_id in cluster_modules, write to `Path(self._parsers_dir) / f"{cluster_id}.py"`
+       - Write test files: For each cluster_id in test_files, write to `Path(self._tests_dir) / f"test_{cluster_id}.py"`
+       - Use `_write_file_with_lock()` helper for atomic file writing
+       - Update state: `node_output = state["node_output"] or {}`, set `node_output["generated_cluster_modules"]` and `node_output["generated_test_files"]`
+       - Also store cluster_error_indices mapping for queue cleanup: `node_output["cluster_error_indices"] = {...}`
+       - Update state and return
        - Test: Verify ACT node generates and writes files correctly with mock LLM response
 
    8.2 **Add file writing helper with locking** [S]
@@ -298,20 +311,25 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    9.1 **Implement _validate_node method** [M]
        - File: `coding_agent/agent.py`
-       - Use `coding_agent.test_runner.run_pytest()` to run tests
-       - Pass tests_dir path to run_pytest
-       - Parse test results (all_passed, test_output, returncode)
-       - Increment retry_count in state
-       - Update state with test_results
-       - Return updated state
+       - Method signature: `def _validate_node(self, state: AnnotationState) -> AnnotationState:`
+       - Use `coding_agent.test_runner.run_pytest(self._tests_dir)` to run tests
+       - Parse test results: `test_results = {"all_passed": returncode == 0, "test_output": output, "returncode": returncode}`
+       - Get current retry_count: `retry_count = state["node_output"].get("retry_count", 0)`
+       - Increment retry_count: `retry_count += 1`
+       - Update state: `node_output = state["node_output"] or {}`, set `node_output["test_results"] = test_results` and `node_output["retry_count"] = retry_count`
+       - If tests pass, set final_output: `state["final_output"] = node_output` (or create final output dict with success info)
+       - Update state and return
        - Test: Verify VALIDATE node runs pytest and parses results correctly
 
    9.2 **Implement _should_retry method** [S]
        - File: `coding_agent/agent.py`
+       - Method signature: `def _should_retry(self, state: AnnotationState) -> str:`
+       - Get test_results: `test_results = state["node_output"].get("test_results", {})`
        - Check test_results["all_passed"]: If True, return "success"
-       - Check retry_count against MAX_RETRY_ATTEMPTS from config
+       - Get retry_count: `retry_count = state["node_output"].get("retry_count", 0)`
+       - Check retry_count against MAX_RETRY_ATTEMPTS from `coding_agent.config`
        - If retry_count < MAX_RETRY_ATTEMPTS, return "retry"
-       - Otherwise, call `_log_failed_batch()` and return "failure"
+       - Otherwise, call `self._log_failed_batch(state)` and return "failure"
        - Test: Verify retry logic works correctly for all scenarios
 
    9.3 **Implement _log_failed_batch method** [S]
@@ -325,17 +343,20 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    10.1 **Add queue cleanup after successful validation** [M]
        - File: `coding_agent/agent.py`
-       - After successful validation (all tests pass), collect error indices from processed clusters
-       - Use `coding_agent.error_queue.remove_processed_cluster_errors()` to remove errors
-       - Map cluster error_indices to global error indices from original queue
-       - Update state with errors_removed_count
+       - In VALIDATE node, after tests pass, collect error indices from `state["node_output"]["cluster_error_indices"]`
+       - This dict maps cluster_id to list of error indices (global indices from original queue)
+       - Flatten all error indices from all clusters into a single list
+       - Use `coding_agent.error_queue.remove_processed_errors(self._error_queue_path, error_indices)` to remove errors
+       - Update state: `node_output["errors_removed_count"] = len(error_indices)`
+       - Note: Error indices should be tracked through the workflow - REASON node should return global indices, not cluster-relative indices
        - Test: Verify processed errors are removed from queue correctly
 
    10.2 **Add module reloading after successful validation** [S]
        - File: `coding_agent/agent.py`
-       - After successful validation and queue cleanup, call `coding_agent.reloader.reload_parser()`
-       - Pass parsers_dir to reloader
-       - Verify parser reloads successfully
+       - After successful validation and queue cleanup in VALIDATE node, call `coding_agent.reloader.reload_parser(self._parsers_dir)`
+       - This reloads all cluster modules using `importlib.reload()`
+       - Note: The actual TimeParser instance reload should be done by the caller after workflow completes, or expose a reload method
+       - Update state: `node_output["parser_reloaded"] = True`
        - Test: Verify modules are reloaded and parser works with new modules
 
 ### 11.0 Create Test Infrastructure [M]
@@ -390,10 +411,14 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    12.4 **Add agent activation demonstration** [M]
        - File: `notebooks/demo.ipynb`
-       - Cell: Check error count threshold
-       - Cell: Initialize CodingAgentWorkflow with LLM and prompts
-       - Cell: Run agent workflow
-       - Cell: Display agent results (processed clusters, errors removed, etc.)
+       - Cell: Check error count threshold (use `coding_agent.error_queue.get_error_count()`)
+       - Cell: Build NodePrompts using `build_node_prompts()` function with formatted prompts
+       - Cell: Build NodeLLMs: `NodeLLMs(reason=llm, plan=llm, act=llm, validate=llm)`
+       - Cell: Generate thread_id: `thread_id = f"coding_agent_{uuid.uuid4().hex[:8]}"` or use timestamp-based ID
+       - Cell: Initialize CodingAgentWorkflow: `workflow = CodingAgentWorkflow(node_llms=..., node_prompts=..., thread_id=..., error_queue_path=..., parsers_dir=..., tests_dir=..., ...)`
+       - Cell: Create initial state: `initial_state = AnnotationState(messages=[], node_output=None, final_output=None)`
+       - Cell: Run agent workflow: `result = workflow.run(initial_state=initial_state)`
+       - Cell: Display agent results (processed clusters, errors removed, etc.) from result dict
        - Test: Verify agent runs successfully
 
    12.5 **Add success verification demonstration** [S]
