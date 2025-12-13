@@ -97,12 +97,17 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    - Conditional edge from VALIDATE: success → END, retry → PLAN, failure → END (safety valve)
    - Node methods signature: `def _node_<name>(self, state: AnnotationState) -> AnnotationState:`
    - Access state: `state["node_output"]` (dict), `state["messages"]`, `state["final_output"]`
-   - Update state: Modify `state["node_output"]` dict, call `self._update_state(state, messages=[...], node_output=node_output)` or set directly, return state
+   - Update state: Modify `state["node_output"]` dict, call `self._update_state(state, messages=[...], node_output=node_output)` (modifies state in place, returns None), then return state
    - JSON parsing: Use `self._llm_json_parser.parse_llm_json_extraction_response()` (available from WorkflowBase), returns `list[dict[str, Any]] | None`
+     - This method handles: markdown code block extraction, JSON repair, multiple JSON objects, returns list of dicts or None
+     - Input: raw LLM response string (may contain markdown, multiple JSON objects, malformed JSON)
+     - Output: `list[dict[str, Any]] | None` - list of parsed JSON objects, or None if parsing fails completely
    - JSON extraction: Use helper functions from `utils.llm_output_parsing_util` to extract structured data from parsed responses
    - Prompts: Access via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair with .system_prompt and .user_prompt)
-   - Prompt formatting: System prompts are constants, user prompts are templates formatted in each node method using `.format()`
+   - Prompt formatting: System prompts are constants, user prompts are templates formatted in each node method using `.format()` (not at initialization)
    - LLM calls: Use `self._call_llm_with_prompt(node_name="...", system_prompt=..., user_prompt=..., schema=None)` - always use `schema=None`
+     - Note: `schema` parameter is accepted but ignored when `enforce_structured_llm_output=False` (which should be False for this workflow)
+     - Response is always `AIMessage` with `.content` attribute (string) when `schema=None`
    - Initial state: `AnnotationState(messages=[], node_output=None, final_output=None)` - pass to `workflow.run(initial_state=...)`
    - Thread ID: Generate unique ID (e.g., `f"coding_agent_{uuid.uuid4().hex[:8]}"` or timestamp-based) - required for WorkflowBase.__init__()
 
@@ -113,9 +118,10 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 5. **Error Clustering:**
    - LLM-based semantic clustering in REASON node
-   - Process up to CLUSTER_BATCH_SIZE clusters per batch (default: 3, configurable)
+   - Process up to CLUSTER_BATCH_SIZE clusters per batch (default: 3, configurable via `coding_agent.config.CLUSTER_BATCH_SIZE`)
+   - Note: Configuration constant is `CLUSTER_BATCH_SIZE` (not ERROR_BATCH_SIZE) - defined in `coding_agent/config.py`
    - Prioritize parsable clusters over context-dependent or ambiguous ones
-   - Cluster IDs become module filenames (lowercase_with_underscores)
+   - Cluster IDs become module filenames (lowercase_with_underscores, sanitized)
 
 6. **Code Generation:**
    - ACT node generates complete module files (not snippets)
@@ -133,7 +139,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 8. **Module Reloading:**
    - After successful validation, reload cluster modules using `importlib.reload()`
    - Call `TimeParser.reload_cluster_modules()` to refresh parser registry
-   - Use file locking (fcntl) to prevent race conditions during updates
+   - Use file locking (fcntl) to prevent race conditions during updates (Unix/macOS/Linux only)
 
 9. **Exception Interceptor:**
    - Decorator/context manager pattern that wraps parser calls
@@ -225,12 +231,33 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    4.4 **Create helper function to build NodePrompts** [S]
        - File: `coding_agent/prompts.py`
        - Add function: `build_node_prompts() -> NodePrompts`
-       - Function creates SystemAndUserPromptPair instances using the constant system prompts and template user prompts
-       - Returns NodePrompts with reason, plan, act prompts populated (user prompts are templates, not formatted yet)
+       - Function signature: `def build_node_prompts() -> NodePrompts:`
+       - Implementation: Create SystemAndUserPromptPair instances using the constant system prompts and template user prompts (not formatted)
+       - Returns NodePrompts with reason, plan, act prompts populated
+       - Example structure:
+         ```python
+         def build_node_prompts() -> NodePrompts:
+             """Build NodePrompts with template user prompts (not formatted)."""
+             return NodePrompts(
+                 reason=SystemAndUserPromptPair(
+                     system_prompt=REASON_NODE_SYSTEM_PROMPT_TEMPLATE,
+                     user_prompt=REASON_NODE_USER_PROMPT_TEMPLATE,  # Template, not formatted
+                 ),
+                 plan=SystemAndUserPromptPair(
+                     system_prompt=PLAN_NODE_SYSTEM_PROMPT_TEMPLATE,
+                     user_prompt=PLAN_NODE_USER_PROMPT_TEMPLATE,  # Template, not formatted
+                 ),
+                 act=SystemAndUserPromptPair(
+                     system_prompt=ACT_NODE_SYSTEM_PROMPT_TEMPLATE,
+                     user_prompt=ACT_NODE_USER_PROMPT_TEMPLATE,  # Template, not formatted
+                 ),
+                 validate=None,  # VALIDATE node doesn't use LLM
+             )
+         ```
        - Note: This function is called at workflow initialization to build NodePrompts
-       - Note: User prompts are formatted in each node method (not at initialization) - mirror pattern from `DO_NOT_COMMIT/ai_aided_annotations/tasks`
-       - In nodes, access prompts via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair), then format user prompt with `.format()`
-       - Test: Verify function creates valid NodePrompts object
+       - Note: User prompts are templates with placeholders (e.g., `{error_queue_contents}`, `{cluster_analysis}`) - they are formatted in each node method (not at initialization)
+       - In nodes, access prompts via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair), then format user prompt with `.format()` in the node method
+       - Test: Verify function creates valid NodePrompts object with template user prompts
 
 ### 5.0 Create CodingAgentWorkflow Class Structure [M]
 
@@ -302,14 +329,17 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Returns: `list[dict[str, Any]] | None`
        - Error handling: If parsed_response is None or empty, log error and raise ValueError (or handle based on fail_fast)
        - Extract data: Use helper function from `utils.llm_output_parsing_util.extract_reason_node_output(parsed_response)` to extract clusters and selected_clusters
-       - Error handling: If helper function returns None or missing required keys, log error and raise ValueError
-       - Sanitize cluster IDs: For each cluster in extracted_data["clusters"], sanitize cluster_id using `self._sanitize_cluster_id(cluster["cluster_id"])` and update cluster dict
+       - Error handling: If helper function returns None or missing required keys, log error and raise ValueError (or handle based on fail_fast setting)
+       - Sanitize cluster IDs immediately after extraction: For each cluster in extracted_data["clusters"], sanitize cluster_id using `self._sanitize_cluster_id(cluster["cluster_id"])` and update cluster dict in place
        - Sanitize selected_clusters: Apply `self._sanitize_cluster_id()` to each cluster_id in extracted_data["selected_clusters"] and filter to only include clusters that exist in sanitized clusters
+       - Note: Cluster IDs must be sanitized immediately after extraction from LLM response, before storing in state (sanitized IDs are used as module filenames)
        - Map error indices from filtered to global: For each cluster in extracted_data["clusters"], convert error_indices (which are relative to filtered_errors) to global indices: `cluster["error_indices"] = [filtered_to_global[idx] for idx in cluster["error_indices"]]`
        - Store in state: `node_output = state["node_output"] or {}`, set `node_output["error_clusters"]` (list of cluster dicts with sanitized cluster_id, error_indices [now global], commonality, examples, etc.) and `node_output["selected_clusters"]` (list of sanitized cluster_ids)
        - Also store `node_output["cluster_error_indices"]` as dict mapping sanitized cluster_id to list of global error indices: `{cluster["cluster_id"]: cluster["error_indices"] for cluster in extracted_data["clusters"] if cluster["cluster_id"] in extracted_data["selected_clusters"]}`
        - Construct messages for state update: `from langchain_core.messages import SystemMessage, HumanMessage; system_message = SystemMessage(content=system_prompt); human_message = HumanMessage(content=user_prompt); messages = [system_message, human_message, response]`
-       - Call `self._update_state(state, messages=messages, node_output=node_output)` and return updated state
+       - Call `self._update_state(state, messages=messages, node_output=node_output)` (modifies state in place, returns None)
+       - Return state: `return state` (state is modified in place by _update_state, just return it)
+       - Error handling: If any step fails, log error and either raise exception (if fail_fast=True) or log warning and return state with error indicators (if fail_fast=False)
        - Test: Verify REASON node clusters errors correctly with mock LLM response
 
 ### 7.0 Implement PLAN Node [M]
@@ -344,7 +374,9 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Error handling: If helper function returns None or missing cluster_plans key, log error and raise ValueError
        - Update state: `node_output = state["node_output"] or {}`, set `node_output["code_plan"] = code_plan`
        - Construct messages for state update: `from langchain_core.messages import SystemMessage, HumanMessage; system_message = SystemMessage(content=system_prompt); human_message = HumanMessage(content=user_prompt); messages = [system_message, human_message, response]`
-       - Call `self._update_state(state, messages=messages, node_output=node_output)` and return updated state
+       - Call `self._update_state(state, messages=messages, node_output=node_output)` (modifies state in place, returns None)
+       - Return state: `return state` (state is modified in place by _update_state, just return it)
+       - Error handling: If any step fails, log error and either raise exception (if fail_fast=True) or log warning and return state with error indicators (if fail_fast=False)
        - Test: Verify PLAN node creates code plans correctly with mock LLM response
 
 ### 8.0 Implement ACT Node [M]
@@ -380,32 +412,38 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
          - Assertions: Check that `parse(input_text)` returns non-None datetime, is timezone-aware, is UTC
          - Use `time_parser.tests.test_utils.assert_valid_datetime()` helper if available
        - Write cluster module files: For each sanitized cluster_id in cluster_modules, write to `Path(self._parsers_dir) / f"{sanitized_cluster_id}.py"`
+         - Note: If file already exists, it will be overwritten (new cluster modules replace old ones)
        - Write test files: For each sanitized cluster_id in test_files, write to `Path(self._tests_dir) / f"test_{sanitized_cluster_id}.py"`
+         - Note: If test file already exists, it will be overwritten (new test files replace old ones)
+         - Future enhancement: Could append new test cases to existing parameterized test lists, but for MVP, overwrite is acceptable
        - Use `_write_file_with_lock()` helper for atomic file writing
        - Error handling: If file writing fails, log error and raise IOError (or handle based on fail_fast)
        - Update state: `node_output = state["node_output"] or {}`, set `node_output["generated_cluster_modules"] = cluster_modules` and `node_output["generated_test_files"] = test_files` (both as dicts with cluster_id keys)
        - Cluster error indices already stored in REASON node: `node_output["cluster_error_indices"]` (dict mapping cluster_id to list of global error indices)
        - Construct messages for state update: `from langchain_core.messages import SystemMessage, HumanMessage; system_message = SystemMessage(content=system_prompt); human_message = HumanMessage(content=user_prompt); messages = [system_message, human_message, response]`
-       - Call `self._update_state(state, messages=messages, node_output=node_output)` and return updated state
+       - Call `self._update_state(state, messages=messages, node_output=node_output)` (modifies state in place, returns None)
+       - Return state: `return state` (state is modified in place by _update_state, just return it)
+       - Error handling: If any step fails (LLM call, JSON parsing, file writing), log error and either raise exception (if fail_fast=True) or log warning and return state with error indicators (if fail_fast=False)
        - Test: Verify ACT node generates and writes files correctly with mock LLM response
 
    8.2 **Add file writing helper with locking** [S]
        - File: `coding_agent/agent.py`
        - Add function: `_write_file_with_lock(file_path: Path, content: str) -> None`
-       - Implementation pattern:
+       - Required imports: `import fcntl`, `import os`, `import time`
+       - Implementation pattern (Unix/macOS/Linux only):
          1. Create temporary file: `temp_file = file_path.with_suffix(f"{file_path.suffix}.tmp")`
          2. Open temp file for writing: `with open(temp_file, "w", encoding="utf-8") as f:`
-         3. Acquire exclusive lock: Use `fcntl.flock(f.fileno(), fcntl.LOCK_EX)` for Unix or `msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)` for Windows
-         4. Write content to temp file
-         5. Flush and sync: `f.flush()`, `os.fsync(f.fileno())` (Unix) or `f.flush()` (Windows)
-         6. Release lock: `fcntl.flock(f.fileno(), fcntl.LOCK_UN)` (Unix) or `msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)` (Windows)
-         7. Close file
-         8. Atomically rename: `temp_file.replace(file_path)` (atomic on Unix, may need different approach on Windows)
-       - Error handling: If lock acquisition fails (non-blocking), wait and retry up to 3 times with 0.1s delay, then raise IOError
-       - Error handling: If write fails, remove temp file and raise IOError
-       - Error handling: If rename fails, remove temp file and raise IOError
-       - Platform detection: Use `import platform; platform.system() == "Windows"` to detect OS
-       - Test: Verify file writing works correctly with locking on both Unix and Windows
+         3. Acquire exclusive lock: `fcntl.flock(f.fileno(), fcntl.LOCK_EX)` (blocking)
+         4. Write content to temp file: `f.write(content)`
+         5. Flush and sync: `f.flush()`, `os.fsync(f.fileno())`
+         6. Release lock: `fcntl.flock(f.fileno(), fcntl.LOCK_UN)`
+         7. Close file (automatic with context manager)
+         8. Atomically rename: `temp_file.replace(file_path)` (atomic on Unix/macOS/Linux)
+       - Error handling: If lock acquisition fails, wait and retry up to 3 times with 0.1s delay (`time.sleep(0.1)`), then raise IOError
+       - Error handling: If write fails, remove temp file (`temp_file.unlink(missing_ok=True)`) and raise IOError
+       - Error handling: If rename fails, remove temp file (`temp_file.unlink(missing_ok=True)`) and raise IOError
+       - Note: Lock is held during entire write operation to prevent concurrent writes
+       - Test: Verify file writing works correctly with locking on macOS/Linux
 
 ### 9.0 Implement VALIDATE Node [M]
 
@@ -428,7 +466,9 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
            - `final_output = {"success": True, "processed_clusters": processed_clusters, "errors_removed_count": errors_removed_count, "parser_updated": True, "tests_passed": True, "retry_count": retry_count, "generated_cluster_modules": node_output.get("generated_cluster_modules", {}), "generated_test_files": node_output.get("generated_test_files", {}), "cluster_error_indices": node_output.get("cluster_error_indices", {})}`
          - Set `state["final_output"] = final_output`
          - Update `node_output["errors_removed_count"] = errors_removed_count` and `node_output["parser_reloaded"] = True`
-       - Update state and return (no messages needed for VALIDATE node - it doesn't call LLM)
+       - Update state: Set `state["node_output"] = node_output` directly (no messages needed for VALIDATE node - it doesn't call LLM)
+       - Return state: `return state`
+       - Error handling: If pytest execution fails with exception, catch it, log error, set test_results with all_passed=False, and either raise (if fail_fast=True) or continue (if fail_fast=False)
        - Test: Verify VALIDATE node runs pytest and parses results correctly
 
    9.2 **Implement _should_retry method** [S]
@@ -469,19 +509,29 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    10.1a **Add file locking to queue cleanup operations** [S]
        - File: `coding_agent/error_queue.py`
-       - Update `remove_processed_cluster_errors()` function to use file locking:
+       - Note: This task MODIFIES existing functions `remove_processed_cluster_errors()` and `append_error_to_queue()` in `error_queue.py` (they currently don't have locking)
+       - Required imports: `import fcntl`, `import os`, `import time`
+       - Update `remove_processed_cluster_errors()` function to use file locking (Unix/macOS/Linux only):
          1. Open queue file for reading: `with open(queue_file, "r", encoding="utf-8") as f:`
-         2. Acquire shared lock: `fcntl.flock(f.fileno(), fcntl.LOCK_SH)` (Unix) or `msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)` (Windows)
-         3. Read all errors
-         4. Release lock and close file
-         5. Filter errors (remove by index)
-         6. Open queue file for writing: `with open(queue_file, "w", encoding="utf-8") as f:`
-         7. Acquire exclusive lock: `fcntl.flock(f.fileno(), fcntl.LOCK_EX)` (Unix) or `msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)` (Windows)
-         8. Write remaining errors
-         9. Flush and sync: `f.flush()`, `os.fsync(f.fileno())` (Unix)
-         10. Release lock and close file
-       - Error handling: If lock acquisition fails, retry up to 3 times with 0.1s delay, then raise IOError
-       - Also update `append_error_to_queue()` to use file locking (exclusive lock for append)
+         2. Acquire shared lock: `fcntl.flock(f.fileno(), fcntl.LOCK_SH)` (shared lock for reading)
+         3. Read all errors: `errors = [json.loads(line) for line in f if line.strip()]`
+         4. Release lock: `fcntl.flock(f.fileno(), fcntl.LOCK_UN)`
+         5. Close file (automatic with context manager)
+         6. Filter errors (remove by index): `remaining_errors = [error for idx, error in enumerate(errors) if idx not in processed_cluster_indices]`
+         7. Open queue file for writing: `with open(queue_file, "w", encoding="utf-8") as f:`
+         8. Acquire exclusive lock: `fcntl.flock(f.fileno(), fcntl.LOCK_EX)` (exclusive lock for writing)
+         9. Write remaining errors: `for error in remaining_errors: f.write(json.dumps(error) + "\n")`
+         10. Flush and sync: `f.flush()`, `os.fsync(f.fileno())`
+         11. Release lock: `fcntl.flock(f.fileno(), fcntl.LOCK_UN)`
+         12. Close file (automatic with context manager)
+       - Update `append_error_to_queue()` function to use file locking (Unix/macOS/Linux only):
+         1. Open queue file for appending: `with open(queue_file, "a", encoding="utf-8") as f:`
+         2. Acquire exclusive lock: `fcntl.flock(f.fileno(), fcntl.LOCK_EX)`
+         3. Append error: `f.write(json.dumps(error) + "\n")`
+         4. Flush and sync: `f.flush()`, `os.fsync(f.fileno())`
+         5. Release lock: `fcntl.flock(f.fileno(), fcntl.LOCK_UN)`
+         6. Close file (automatic with context manager)
+       - Error handling: If lock acquisition fails, retry up to 3 times with 0.1s delay (`time.sleep(0.1)`), then raise IOError
        - Test: Verify queue operations work correctly with locking, no race conditions
 
    10.2 **Add module reloading after successful validation** [S]
@@ -498,26 +548,47 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    11.1 **Create llm_output_parsing_util.py** [M]
        - File: `utils/llm_output_parsing_util.py`
+       - Required imports: `import logging` (for warnings), `from typing import Any`
        - Add helper functions to extract structured data from parsed JSON responses (from `llm_json_parser.parse_llm_json_extraction_response()`)
        - Functions should extract data from `list[dict[str, Any]] | None` returned by JSON parser
        - Add function: `extract_reason_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
-         - Extracts clusters, selected_clusters, and other fields from REASON node response
-         - Error handling: If parsed_response is None or empty, return empty dict with default values or raise ValueError (document behavior)
-         - Error handling: If first dict in list is missing required keys (clusters, selected_clusters), log warning and return partial data or raise ValueError
-         - Returns dict with keys: `clusters` (list of cluster dicts), `selected_clusters` (list of cluster_ids), `total_errors_analyzed` (int), `total_clusters_identified` (int), `clusters_selected_count` (int)
+         - Function signature: `def extract_reason_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]:`
+         - Input: `parsed_response` from `parse_llm_json_extraction_response()` - list of dicts or None
+         - Expected structure: First dict in list should contain keys: `clusters` (list), `selected_clusters` (list), `total_errors_analyzed` (int), `total_clusters_identified` (int), `clusters_selected_count` (int)
+         - Error handling: 
+           - If `parsed_response` is None or empty list, raise ValueError with message "REASON node response is None or empty"
+           - If first dict is missing required key `clusters`, raise ValueError with message "REASON node response missing 'clusters' key"
+           - If first dict is missing required key `selected_clusters`, raise ValueError with message "REASON node response missing 'selected_clusters' key"
+           - If optional keys are missing (`total_errors_analyzed`, etc.), log warning and use default values (0 for ints, empty list for lists)
+         - Returns dict with keys: 
+           - `clusters` (list[dict]): List of cluster dicts, each with keys: cluster_id, error_indices, commonality, examples, suggested_approach, parsability, error_count
+           - `selected_clusters` (list[str]): List of cluster_id strings selected for processing
+           - `total_errors_analyzed` (int): Total number of errors analyzed (default 0 if missing)
+           - `total_clusters_identified` (int): Total number of clusters found (default 0 if missing)
+           - `clusters_selected_count` (int): Number of clusters selected (default len(selected_clusters) if missing)
        - Add function: `extract_plan_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
-         - Extracts code_plan with cluster_plans array from PLAN node response
-         - Error handling: If parsed_response is None or empty, return empty dict or raise ValueError
-         - Error handling: If missing cluster_plans key, log warning and return empty dict or raise ValueError
-         - Returns dict with key: `cluster_plans` (list of plan dicts, each with cluster_id, parsing_strategy, code_structure, test_cases, dependencies, edge_cases)
+         - Function signature: `def extract_plan_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]:`
+         - Input: `parsed_response` from `parse_llm_json_extraction_response()` - list of dicts or None
+         - Expected structure: First dict in list should contain key: `cluster_plans` (list of plan dicts)
+         - Error handling:
+           - If `parsed_response` is None or empty list, raise ValueError with message "PLAN node response is None or empty"
+           - If first dict is missing required key `cluster_plans`, raise ValueError with message "PLAN node response missing 'cluster_plans' key"
+         - Returns dict with key: 
+           - `cluster_plans` (list[dict]): List of plan dicts, each with keys: cluster_id, parsing_strategy, code_structure, test_cases (list), dependencies (list), edge_cases (list)
        - Add function: `extract_act_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
-         - Extracts cluster_modules and test_files dictionaries from ACT node response
-         - Error handling: If parsed_response is None or empty, return empty dict or raise ValueError
-         - Error handling: If missing cluster_modules or test_files keys, log warning and return partial data or raise ValueError
-         - Returns dict with keys: `cluster_modules` (dict mapping cluster_id to code string), `test_files` (dict mapping cluster_id to test code string)
+         - Function signature: `def extract_act_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]:`
+         - Input: `parsed_response` from `parse_llm_json_extraction_response()` - list of dicts or None
+         - Expected structure: First dict in list should contain keys: `cluster_modules` (dict), `test_files` (dict)
+         - Error handling:
+           - If `parsed_response` is None or empty list, raise ValueError with message "ACT node response is None or empty"
+           - If first dict is missing required key `cluster_modules`, raise ValueError with message "ACT node response missing 'cluster_modules' key"
+           - If first dict is missing required key `test_files`, raise ValueError with message "ACT node response missing 'test_files' key"
+         - Returns dict with keys:
+           - `cluster_modules` (dict[str, str]): Dictionary mapping cluster_id (str) to module code (str)
+           - `test_files` (dict[str, str]): Dictionary mapping cluster_id (str) to test file code (str)
+       - Error handling strategy: Always raise ValueError for missing required keys (don't return partial data) - let calling code handle errors based on fail_fast setting
        - Note: Pattern similar to examples in `DO_NOT_COMMIT/ai_aided_annotations/util.py` but adapted for our use case
-       - Error handling strategy: Log warnings for missing optional keys, raise ValueError for missing required keys (or return empty dicts based on fail_fast parameter if added)
-       - Test: Verify parsing functions extract data correctly from various JSON response formats
+       - Test: Verify parsing functions extract data correctly from various JSON response formats, verify error handling for None/empty/missing keys
 
 ### 12.0 Create Test Infrastructure [M]
 
@@ -572,10 +643,34 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    13.4 **Add agent activation demonstration** [M]
        - File: `notebooks/demo.ipynb`
        - Cell: Check error count threshold (use `coding_agent.error_queue.get_error_count()`)
-       - Cell: Build NodePrompts using `build_node_prompts()` function (returns NodePrompts with template user prompts, not formatted)
+       - Cell: Build NodePrompts using `build_node_prompts()` function:
+         ```python
+         from coding_agent.prompts import build_node_prompts
+         node_prompts = build_node_prompts()
+         # node_prompts contains template user prompts (not formatted)
+         # User prompts will be formatted in each node method with actual data
+         ```
        - Cell: Build NodeLLMs: `NodeLLMs(reason=llm, plan=llm, act=llm, validate=llm)`
        - Cell: Generate thread_id: `thread_id = f"coding_agent_{uuid.uuid4().hex[:8]}"` or use timestamp-based ID
-       - Cell: Initialize CodingAgentWorkflow: `workflow = CodingAgentWorkflow(node_llms=..., node_prompts=..., thread_id=..., error_queue_path=..., parsers_dir=..., tests_dir=..., rate_limiting_config=..., fail_fast=..., error_logging=..., debug_logging=...)`
+       - Cell: Initialize CodingAgentWorkflow:
+         ```python
+         from coding_agent.agent import CodingAgentWorkflow
+         from coding_agent.base import DEFAULT_RATE_LIMITING_CONFIG
+         
+         workflow = CodingAgentWorkflow(
+             node_llms=node_llms,
+             node_prompts=node_prompts,  # Template prompts, not formatted
+             thread_id=thread_id,
+             error_queue_path="error_queue.jsonl",
+             parsers_dir="time_parser/parsers",
+             tests_dir="time_parser/tests",
+             rate_limiting_config=DEFAULT_RATE_LIMITING_CONFIG,
+             fail_fast=False,
+             error_logging=True,
+             debug_logging=False,
+             enforce_structured_llm_output=False,  # Must be False for schema=None
+         )
+         ```
        - Note: error_queue_path, parsers_dir, tests_dir are instance variables (not in initial state)
        - Cell: Create initial state: `initial_state = AnnotationState(messages=[], node_output=None, final_output=None)`
        - Cell: Run agent workflow: `result = workflow.run(initial_state=initial_state)`
