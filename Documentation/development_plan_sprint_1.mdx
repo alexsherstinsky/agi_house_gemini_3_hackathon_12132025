@@ -66,6 +66,9 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    - Error queue: `error_queue.jsonl` (repository root, gitignored)
    - Failed batches: `failed_batches.jsonl` (repository root, gitignored)
 
+7. **Test Fixtures:**
+   - Error examples: `tests/fixtures/follow_up_tasks_202512121435.jsonl` (source data for testing and demonstration)
+
 ### Architectural Decisions
 
 1. **Modular Parser Architecture:**
@@ -134,8 +137,9 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    1.1 **Install project dependencies** [S]
        - Navigate to project root: `cd agi_house_gemini_3_hackathon_12132025`
-       - Run: `pip install -e .`
-       - Verify all dependencies install correctly (langchain, langchain-google-genai, langgraph, pydantic, pytest, python-dateutil)
+       - Run: `pip install -e .` (installs main dependencies including pandas)
+       - Optional: Run `pip install -e ".[dev]"` to also install dev dependencies (jupyter, matplotlib, tqdm)
+       - Verify all dependencies install correctly (langchain, langchain-google-genai, langgraph, pydantic, pytest, python-dateutil, pandas)
        - Note: This installs from pyproject.toml
 
    1.2 **Verify GOOGLE_API_KEY environment variable** [S]
@@ -359,6 +363,16 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Temperature: 0.2, max_tokens: 8192
        - Test: Verify notebook runs without errors
 
+   12.1a **Add problem demonstration with fixture data** [S]
+       - File: `notebooks/demo.ipynb`
+       - Add cell: Load fixture file using pandas: `pd.read_json('tests/fixtures/follow_up_tasks_202512121435.jsonl', lines=True)`
+       - Add cell: Display sample rows showing the problem:
+         - Show a few rows where `deadline_at` is null (parsing failed)
+         - Show a few rows where `deadline_at` has a value (parsing succeeded)
+       - Use pandas DataFrame display to show: `customer_id`, `timing_description`, `deadline_at` columns
+       - Add explanatory text: "This demonstrates the problem - some timing descriptions fail to parse (deadline_at is null), while others succeed"
+       - Test: Verify fixture file loads correctly and display shows both error and success cases
+
    12.2 **Add initial parser state demonstration** [S]
        - File: `notebooks/demo.ipynb`
        - Cell: Show initial TimeParser implementation
@@ -393,7 +407,9 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 ### 13.0 Integration Testing and Refinement [M]
 
    13.1 **Test complete end-to-end flow** [M]
-       - Create test error queue with sample errors from follow_up_tasks_202512121435.jsonl
+       - Create test error queue with sample errors from `tests/fixtures/follow_up_tasks_202512121435.jsonl`
+       - Filter fixture data: Select rows where `deadline_at` is null (these are the parsing failures)
+       - Copy selected rows to error_queue.jsonl for testing
        - Run agent workflow
        - Verify: Errors are clustered correctly
        - Verify: Code is generated and written correctly
@@ -424,7 +440,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 - GOOGLE_API_KEY environment variable set
 - Project dependencies installed (`pip install -e .`)
 - Jupyter notebook environment available
-- Test error data available (from `DO_NOT_COMMIT/follow_up_tasks_202512121435.jsonl`)
+- Test error data available (from `tests/fixtures/follow_up_tasks_202512121435.jsonl`)
 
 ### Test 1: Basic Parser Functionality
 
@@ -471,7 +487,8 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 1. **Prepare error queue:**
    - Populate error_queue.jsonl with sample errors (at least ERROR_THRESHOLD errors)
-   - Use errors from follow_up_tasks_202512121435.jsonl
+   - Use errors from `tests/fixtures/follow_up_tasks_202512121435.jsonl`
+   - Filter for rows where `deadline_at` is null (these represent parsing failures)
 
 2. **Initialize agent:**
    - Create CodingAgentWorkflow instance
@@ -541,6 +558,8 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    - Clear any existing cluster modules
 
 2. **Populate error queue:**
+   - Load fixture data from `tests/fixtures/follow_up_tasks_202512121435.jsonl`
+   - Filter for rows where `deadline_at` is null (parsing failures)
    - Add at least ERROR_THRESHOLD errors to error_queue.jsonl
    - Use diverse error patterns (relative dates, specific dates, time ranges)
 
