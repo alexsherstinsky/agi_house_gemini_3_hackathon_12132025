@@ -60,6 +60,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    - Dynamic loading: `utils/dynamic_loading.py` (module loading utilities - already exists)
    - JSON parser: `utils/llm_json_parser.py` (LLMJsonParser class for parsing LLM JSON responses - already exists)
    - JSON helpers: `utils/json_helpers.py` (is_valid_json function - already exists)
+   - LLM output parsing utilities: `utils/llm_output_parsing_util.py` (helper functions to extract structured data from parsed JSON responses - to be created)
 
 5. **Demo Notebook:**
    - File: `notebooks/demo.ipynb` (Jupyter notebook for demonstration)
@@ -97,9 +98,11 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    - Node methods signature: `def _node_<name>(self, state: AnnotationState) -> AnnotationState:`
    - Access state: `state["node_output"]` (dict), `state["messages"]`, `state["final_output"]`
    - Update state: Modify `state["node_output"]` dict, call `self._update_state(state, messages=[...], node_output=node_output)` or set directly, return state
-   - JSON parsing: Use `self._llm_json_parser.parse_llm_json_extraction_response()` (available from WorkflowBase)
+   - JSON parsing: Use `self._llm_json_parser.parse_llm_json_extraction_response()` (available from WorkflowBase), returns `list[dict[str, Any]] | None`
+   - JSON extraction: Use helper functions from `utils.llm_output_parsing_util` to extract structured data from parsed responses
    - Prompts: Access via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair with .system_prompt and .user_prompt)
-   - LLM calls: Use `self._call_llm_with_prompt(node_name="...", system_prompt=..., user_prompt=..., schema=None)`
+   - Prompt formatting: System prompts are constants, user prompts are templates formatted in each node method using `.format()`
+   - LLM calls: Use `self._call_llm_with_prompt(node_name="...", system_prompt=..., user_prompt=..., schema=None)` - always use `schema=None`
    - Initial state: `AnnotationState(messages=[], node_output=None, final_output=None)` - pass to `workflow.run(initial_state=...)`
    - Thread ID: Generate unique ID (e.g., `f"coding_agent_{uuid.uuid4().hex[:8]}"` or timestamp-based) - required for WorkflowBase.__init__()
 
@@ -119,6 +122,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    - One module file per cluster: `time_parser/parsers/<cluster_id>.py`
    - One test file per cluster: `time_parser/tests/test_<cluster_id>.py`
    - All code must be syntactically correct and ready to execute
+   - Store generated modules and test files as dictionaries with cluster_id (without `.py` suffix) as keys
 
 7. **Test Validation:**
    - VALIDATE node runs pytest on `time_parser/tests/` directory
@@ -194,32 +198,36 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    4.1 **Add REASON node prompt templates** [M]
        - File: `coding_agent/prompts.py`
-       - Add: `REASON_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.1 of design doc)
-       - Add: `REASON_NODE_USER_PROMPT_TEMPLATE` (from Section 18.1 of design doc)
-       - Templates use `{error_queue_contents}` placeholder for formatting
+       - Add: `REASON_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.1 of design doc) - constant string
+       - Add: `REASON_NODE_USER_PROMPT_TEMPLATE` (from Section 18.1 of design doc) - template with `{error_queue_contents}` placeholder
+       - Note: System prompt is constant, user prompt is formatted in REASON node with actual error queue contents
+       - Note: `{error_queue_contents}` should contain entire content of parsing errors (only rows where parsing failed, i.e., `deadline_at` is null)
        - Test: Verify templates are valid Python strings, can be formatted
 
    4.2 **Add PLAN node prompt templates** [M]
        - File: `coding_agent/prompts.py`
-       - Add: `PLAN_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.2 of design doc)
-       - Add: `PLAN_NODE_USER_PROMPT_TEMPLATE` (from Section 18.2 of design doc)
-       - Templates use `{cluster_analysis}` and `{existing_cluster_modules}` placeholders
+       - Add: `PLAN_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.2 of design doc) - constant string
+       - Add: `PLAN_NODE_USER_PROMPT_TEMPLATE` (from Section 18.2 of design doc) - template with `{cluster_analysis}` and `{existing_cluster_modules}` placeholders
+       - Note: System prompt is constant, user prompt is formatted in PLAN node with cluster analysis and existing modules
+       - Note: `{cluster_analysis}` is the output from REASON node, `{existing_cluster_modules}` are modules already in `time_parser/parsers/` directory (for context)
        - Test: Verify templates are valid Python strings, can be formatted
 
    4.3 **Add ACT node prompt templates** [M]
        - File: `coding_agent/prompts.py`
-       - Add: `ACT_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.3 of design doc)
-       - Add: `ACT_NODE_USER_PROMPT_TEMPLATE` (from Section 18.3 of design doc)
-       - Templates use `{code_plan}` placeholder for formatting
+       - Add: `ACT_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.3 of design doc) - constant string
+       - Add: `ACT_NODE_USER_PROMPT_TEMPLATE` (from Section 18.3 of design doc) - template with `{code_plan}` placeholder
+       - Note: System prompt is constant, user prompt is formatted in ACT node with code plan
+       - Note: `{code_plan}` is the output from PLAN node
        - Test: Verify templates are valid Python strings, can be formatted
 
    4.4 **Create helper function to build NodePrompts** [S]
        - File: `coding_agent/prompts.py`
-       - Add function: `build_node_prompts(error_queue_contents: str, cluster_analysis: str, existing_modules: str, code_plan: str) -> NodePrompts`
-       - Function formats templates and creates SystemAndUserPromptPair instances
-       - Returns NodePrompts with reason, plan, act prompts populated
-       - Note: This function is called at workflow initialization to build NodePrompts, not in each node
-       - In nodes, access prompts via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair)
+       - Add function: `build_node_prompts() -> NodePrompts`
+       - Function creates SystemAndUserPromptPair instances using the constant system prompts and template user prompts
+       - Returns NodePrompts with reason, plan, act prompts populated (user prompts are templates, not formatted yet)
+       - Note: This function is called at workflow initialization to build NodePrompts
+       - Note: User prompts are formatted in each node method (not at initialization) - mirror pattern from `DO_NOT_COMMIT/ai_aided_annotations/tasks`
+       - In nodes, access prompts via `self._node_prompts.<node_name>` (returns SystemAndUserPromptPair), then format user prompt with `.format()`
        - Test: Verify function creates valid NodePrompts object
 
 ### 5.0 Create CodingAgentWorkflow Class Structure [M]
@@ -249,17 +257,19 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - File: `coding_agent/agent.py`
        - Method signature: `def _reason_node(self, state: AnnotationState) -> AnnotationState:`
        - Read error queue using `coding_agent.error_queue.read_error_queue(self._error_queue_path)`
-       - Format error queue contents as JSONL string for prompt
+       - Filter errors: Only include rows where `deadline_at` is null (parsing failures - these are the errors we want to fix)
+       - Format error queue contents as JSONL string: `error_queue_contents = "\n".join(json.dumps(error) for error in errors)`
+       - Note: Each line in error_queue_contents should be a complete JSON object with `timing_description` field (the text that failed to parse)
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.reason`
-       - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt`
-       - Format user prompt: `user_prompt = system_and_user_prompt_pair.user_prompt.format(error_queue_contents=...)`
-       - Call LLM: `response = self._call_llm_with_prompt(node_name="reason", system_prompt=..., user_prompt=..., schema=None)`
+       - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
+       - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(error_queue_contents=error_queue_contents)`
+       - Call LLM: `response = self._call_llm_with_prompt(node_name="reason", system_prompt=system_prompt, user_prompt=user_prompt, schema=None)`
        - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(response.content, fail_fast=self._fail_fast, context_identifier=("Node", "reason"), debug_logging=self._debug_logging)`
-       - Extract first dict from parsed list (or handle dict directly): `parsed_data = parsed_list[0] if parsed_list else {}`
-       - Extract clusters and selected_clusters from parsed_data
-       - Update state: `node_output = state["node_output"] or {}`, set `node_output["error_clusters"]` and `node_output["selected_clusters"]`
-       - Call `self._update_state(state, messages=[...], node_output=node_output)` or update directly
-       - Return updated state
+       - Returns: `list[dict[str, Any]] | None`
+       - Extract data: Use helper function from `utils.llm_output_parsing_util` to extract clusters and selected_clusters from parsed response
+       - Store in state: `node_output = state["node_output"] or {}`, set `node_output["error_clusters"]` (list of cluster dicts) and `node_output["selected_clusters"]` (list of cluster_ids)
+       - Also store `node_output["cluster_error_indices"]` as dict mapping cluster_id to list of error indices (global indices from original queue)
+       - Call `self._update_state(state, messages=[...], node_output=node_output)` and return updated state
        - Test: Verify REASON node clusters errors correctly with mock LLM response
 
 ### 7.0 Implement PLAN Node [M]
@@ -267,16 +277,19 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    7.1 **Implement _plan_node method** [M]
        - File: `coding_agent/agent.py`
        - Method signature: `def _plan_node(self, state: AnnotationState) -> AnnotationState:`
-       - Read existing cluster modules from parsers_dir: List `.py` files, read each file, extract brief description
-       - Format cluster_analysis from state: `cluster_analysis = json.dumps(state["node_output"]["selected_clusters"], indent=2)`
-       - Format existing_cluster_modules list: Create list of dicts with module name and description
+       - Read existing cluster modules from parsers_dir: List `.py` files (excluding `__init__.py`), read each file, extract brief description
+       - Format cluster_analysis from state: `cluster_analysis = json.dumps(state["node_output"]["selected_clusters"], indent=2)` (output from REASON node)
+       - Format existing_cluster_modules: Create list of dicts with module name (without `.py` suffix, just the stem) and brief description
+       - Format as string: `existing_modules_str = json.dumps(existing_cluster_modules, indent=2)`
+       - Note: Module names should be unambiguous without `.py` suffix (e.g., `relative_dates` not `relative_dates.py`)
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.plan`
-       - Format user prompt: `user_prompt = system_and_user_prompt_pair.user_prompt.format(cluster_analysis=..., existing_modules=...)`
-       - Call LLM: `response = self._call_llm_with_prompt(node_name="plan", system_prompt=..., user_prompt=..., schema=None)`
+       - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
+       - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(cluster_analysis=cluster_analysis, existing_cluster_modules=existing_modules_str)`
+       - Call LLM: `response = self._call_llm_with_prompt(node_name="plan", system_prompt=system_prompt, user_prompt=user_prompt, schema=None)`
        - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(...)` as in REASON node
-       - Extract code_plan from parsed response (should be a dict with cluster_plans array)
+       - Extract code_plan: Use helper function from `utils.llm_output_parsing_util` to extract code_plan dict (should have cluster_plans array)
        - Update state: `node_output = state["node_output"] or {}`, set `node_output["code_plan"] = code_plan`
-       - Update state and return
+       - Call `self._update_state(state, messages=[...], node_output=node_output)` and return updated state
        - Test: Verify PLAN node creates code plans correctly with mock LLM response
 
 ### 8.0 Implement ACT Node [M]
@@ -284,19 +297,21 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    8.1 **Implement _act_node method** [M]
        - File: `coding_agent/agent.py`
        - Method signature: `def _act_node(self, state: AnnotationState) -> AnnotationState:`
-       - Get code_plan from state: `code_plan = state["node_output"]["code_plan"]`
+       - Get code_plan from state: `code_plan = state["node_output"]["code_plan"]` (output from PLAN node)
        - Format code_plan as JSON string: `code_plan_str = json.dumps(code_plan, indent=2)`
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.act`
-       - Format user prompt: `user_prompt = system_and_user_prompt_pair.user_prompt.format(code_plan=code_plan_str)`
-       - Call LLM: `response = self._call_llm_with_prompt(node_name="act", system_prompt=..., user_prompt=..., schema=None)`
+       - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
+       - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(code_plan=code_plan_str)`
+       - Call LLM: `response = self._call_llm_with_prompt(node_name="act", system_prompt=system_prompt, user_prompt=user_prompt, schema=None)`
        - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(...)` as in REASON node
-       - Extract cluster_modules and test_files dictionaries from parsed response
+       - Extract cluster_modules and test_files: Use helper function from `utils.llm_output_parsing_util` to extract dictionaries from parsed response
+       - Store as dictionaries with cluster names (without `.py` suffix) as keys: `cluster_modules[cluster_id] = code_string`, `test_files[cluster_id] = test_code_string`
        - Write cluster module files: For each cluster_id in cluster_modules, write to `Path(self._parsers_dir) / f"{cluster_id}.py"`
        - Write test files: For each cluster_id in test_files, write to `Path(self._tests_dir) / f"test_{cluster_id}.py"`
        - Use `_write_file_with_lock()` helper for atomic file writing
-       - Update state: `node_output = state["node_output"] or {}`, set `node_output["generated_cluster_modules"]` and `node_output["generated_test_files"]`
-       - Also store cluster_error_indices mapping for queue cleanup: `node_output["cluster_error_indices"] = {...}`
-       - Update state and return
+       - Update state: `node_output = state["node_output"] or {}`, set `node_output["generated_cluster_modules"] = cluster_modules` and `node_output["generated_test_files"] = test_files` (both as dicts with cluster_id keys)
+       - Cluster error indices already stored in REASON node: `node_output["cluster_error_indices"]` (dict mapping cluster_id to list of error indices)
+       - Call `self._update_state(state, messages=[...], node_output=node_output)` and return updated state
        - Test: Verify ACT node generates and writes files correctly with mock LLM response
 
    8.2 **Add file writing helper with locking** [S]
@@ -345,10 +360,10 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - File: `coding_agent/agent.py`
        - In VALIDATE node, after tests pass, collect error indices from `state["node_output"]["cluster_error_indices"]`
        - This dict maps cluster_id to list of error indices (global indices from original queue)
-       - Flatten all error indices from all clusters into a single list
-       - Use `coding_agent.error_queue.remove_processed_errors(self._error_queue_path, error_indices)` to remove errors
-       - Update state: `node_output["errors_removed_count"] = len(error_indices)`
-       - Note: Error indices should be tracked through the workflow - REASON node should return global indices, not cluster-relative indices
+       - Flatten all error indices from all clusters into a single list: `all_error_indices = [idx for indices in cluster_error_indices.values() for idx in indices]`
+       - Use `coding_agent.error_queue.remove_processed_cluster_errors(self._error_queue_path, all_error_indices)` to remove errors
+       - Update state: `node_output["errors_removed_count"] = len(all_error_indices)`
+       - Note: Error indices are tracked through the workflow - REASON node stores global indices in `cluster_error_indices` dict
        - Test: Verify processed errors are removed from queue correctly
 
    10.2 **Add module reloading after successful validation** [S]
@@ -359,22 +374,41 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Update state: `node_output["parser_reloaded"] = True`
        - Test: Verify modules are reloaded and parser works with new modules
 
-### 11.0 Create Test Infrastructure [M]
+### 11.0 Create LLM Output Parsing Utilities [M]
 
-   11.1 **Create test utilities** [S]
+   11.1 **Create llm_output_parsing_util.py** [M]
+       - File: `utils/llm_output_parsing_util.py`
+       - Add helper functions to extract structured data from parsed JSON responses (from `llm_json_parser.parse_llm_json_extraction_response()`)
+       - Functions should extract data from `list[dict[str, Any]] | None` returned by JSON parser
+       - Add function: `extract_reason_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
+         - Extracts clusters, selected_clusters, and other fields from REASON node response
+         - Returns dict with keys: `clusters`, `selected_clusters`, `total_errors_analyzed`, etc.
+       - Add function: `extract_plan_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
+         - Extracts code_plan with cluster_plans array from PLAN node response
+         - Returns dict with key: `cluster_plans` (list of plan dicts)
+       - Add function: `extract_act_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
+         - Extracts cluster_modules and test_files dictionaries from ACT node response
+         - Returns dict with keys: `cluster_modules` (dict mapping cluster_id to code string), `test_files` (dict mapping cluster_id to test code string)
+       - Note: Pattern similar to examples in `DO_NOT_COMMIT/ai_aided_annotations/util.py` but adapted for our use case
+       - Handle edge cases: empty lists, None responses, missing keys
+       - Test: Verify parsing functions extract data correctly from various JSON response formats
+
+### 12.0 Create Test Infrastructure [M]
+
+   12.1 **Create test utilities** [S]
        - File: `time_parser/tests/test_utils.py`
        - Add function: `assert_valid_datetime(result: datetime | None, input_text: str) -> None`
        - Assertions: result is not None, is datetime instance, has timezone, is UTC
        - Test: Verify utility function works correctly
 
-   11.2 **Create shared pytest fixtures** [S]
+   12.2 **Create shared pytest fixtures** [S]
        - File: `time_parser/tests/conftest.py`
        - Add fixture: `parser()` that returns TimeParser instance
        - Test: Verify fixture works in pytest
 
-### 12.0 Create Demo Jupyter Notebook [M]
+### 13.0 Create Demo Jupyter Notebook [M]
 
-   12.1 **Create notebook structure** [M]
+   13.1 **Create notebook structure** [M]
        - File: `notebooks/demo.ipynb`
        - Follow style of reference_notebook.ipynb (path setup, imports, logging configuration)
        - Add cells for: imports, path setup, logging, Gemini LLM initialization
@@ -384,7 +418,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Temperature: 0.2, max_tokens: 8192
        - Test: Verify notebook runs without errors
 
-   12.1a **Add problem demonstration with fixture data** [S]
+   13.1a **Add problem demonstration with fixture data** [S]
        - File: `notebooks/demo.ipynb`
        - Add cell: Load fixture file using pandas: `pd.read_json('tests/fixtures/follow_up_tasks_202512121435.jsonl', lines=True)`
        - Add cell: Display sample rows showing the problem:
@@ -394,14 +428,14 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Add explanatory text: "This demonstrates the problem - some timing descriptions fail to parse (deadline_at is null), while others succeed"
        - Test: Verify fixture file loads correctly and display shows both error and success cases
 
-   12.2 **Add initial parser state demonstration** [S]
+   13.2 **Add initial parser state demonstration** [S]
        - File: `notebooks/demo.ipynb`
        - Cell: Show initial TimeParser implementation
        - Cell: Show empty parsers/ directory
        - Cell: Test parser with basic inputs ("asap", "now")
        - Test: Verify cells execute correctly
 
-   12.3 **Add error collection demonstration** [M]
+   13.3 **Add error collection demonstration** [M]
        - File: `notebooks/demo.ipynb`
        - Cell: Wrap parser with exception interceptor
        - Cell: Test parser with various inputs that will fail
@@ -409,7 +443,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Cell: Show clustering preview (what REASON node will do)
        - Test: Verify errors are collected and displayed
 
-   12.4 **Add agent activation demonstration** [M]
+   13.4 **Add agent activation demonstration** [M]
        - File: `notebooks/demo.ipynb`
        - Cell: Check error count threshold (use `coding_agent.error_queue.get_error_count()`)
        - Cell: Build NodePrompts using `build_node_prompts()` function with formatted prompts
@@ -421,7 +455,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Cell: Display agent results (processed clusters, errors removed, etc.) from result dict
        - Test: Verify agent runs successfully
 
-   12.5 **Add success verification demonstration** [S]
+   13.5 **Add success verification demonstration** [S]
        - File: `notebooks/demo.ipynb`
        - Cell: Reload parser after agent update
        - Cell: Test parser with previously failing inputs
@@ -429,9 +463,9 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Cell: Show updated error queue (should have fewer errors)
        - Test: Verify complete self-healing flow works
 
-### 13.0 Integration Testing and Refinement [M]
+### 14.0 Integration Testing and Refinement [M]
 
-   13.1 **Test complete end-to-end flow** [M]
+   14.1 **Test complete end-to-end flow** [M]
        - Create test error queue with sample errors from `tests/fixtures/follow_up_tasks_202512121435.jsonl`
        - Filter fixture data: Select rows where `deadline_at` is null (these are the parsing failures)
        - Copy selected rows to error_queue.jsonl for testing
@@ -443,14 +477,14 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Verify: Processed errors are removed from queue
        - Test: Complete flow works without errors
 
-   13.2 **Refine prompts based on actual LLM behavior** [M]
+   14.2 **Refine prompts based on actual LLM behavior** [M]
        - Run agent with real errors
        - Observe LLM responses and adjust prompts if needed
        - Ensure JSON output format is consistent
        - Ensure code generation quality is acceptable
        - Test: Prompts produce reliable, high-quality outputs
 
-   13.3 **Add error handling and logging** [S]
+   14.3 **Add error handling and logging** [S]
        - Add comprehensive error handling throughout workflow
        - Add logging for debugging (use Python logging module)
        - Handle LLM API errors gracefully
@@ -461,7 +495,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### Prerequisites
 
-- All tasks 1.0-13.0 must be completed
+- All tasks 1.0-14.0 must be completed
 - GOOGLE_API_KEY environment variable set
 - Project dependencies installed (`pip install -e .`)
 - Jupyter notebook environment available
