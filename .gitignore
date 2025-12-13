@@ -126,3 +126,7 @@ ml_models/
 # Database backups
 applications/home_services_leader/backups/
 platform/conversation_analysis/backups/
+
+# Hackathon project runtime data files
+error_queue.jsonl
+failed_batches.jsonl
