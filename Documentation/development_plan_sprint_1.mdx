@@ -301,10 +301,11 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    5.2 **Implement _add_workflow_nodes_and_edges method** [M]
        - File: `coding_agent/agent.py`
+       - Required imports: `from langgraph.graph import END, START, StateGraph` (START and END are constants from langgraph.graph)
        - Add nodes: `workflow.add_node("reason", self._reason_node)`, etc.
-       - Set entry point: `workflow.add_edge(START, "reason")`
+       - Set entry point: `workflow.add_edge(START, "reason")` (START is imported from langgraph.graph)
        - Add sequential edges: `workflow.add_edge("reason", "plan")`, `workflow.add_edge("plan", "act")`, `workflow.add_edge("act", "validate")`
-       - Add conditional edge from validate: `workflow.add_conditional_edges("validate", self._should_retry, {"success": END, "retry": "plan", "failure": END})`
+       - Add conditional edge from validate: `workflow.add_conditional_edges("validate", self._should_retry, {"success": END, "retry": "plan", "failure": END})` (END is imported from langgraph.graph)
        - Note: `_should_retry()` method should return "success", "retry", or "failure" based on test results and retry count
        - Test: Verify workflow graph structure is correct
 
@@ -316,8 +317,13 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Read full error queue using `coding_agent.error_queue.read_error_queue(self._error_queue_path)` - store as `all_errors`
        - Filter errors: Only include rows where `deadline_at` is null (parsing failures - these are the errors we want to fix) - store as `filtered_errors`
        - Create mapping from filtered index to global index: `filtered_to_global = {filtered_idx: global_idx for global_idx, error in enumerate(all_errors) if error.get("deadline_at") is None}`
-       - Error handling: If no errors found, log warning and return state with empty clusters
+       - Error handling: If no errors found, log warning and return state with empty clusters:
+         - Set `node_output["error_clusters"] = []` (empty list)
+         - Set `node_output["selected_clusters"] = []` (empty list)
+         - Set `node_output["cluster_error_indices"] = {}` (empty dict)
+         - Workflow will continue but no clusters will be processed (subsequent nodes should handle empty clusters gracefully)
        - Format error queue contents as JSONL string: `error_queue_contents = "\n".join(json.dumps(error) for error in filtered_errors)`
+       - Required imports: `import json` (for json.dumps)
        - Note: Each line in error_queue_contents should be a complete JSON object with `timing_description` field (the text that failed to parse)
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.reason`
        - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
@@ -357,6 +363,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
          6. Truncate description to max 150 characters
        - Format existing_cluster_modules: Create list of dicts with structure: `[{"module_name": "relative_dates", "description": "Brief description extracted from module docstring or first few lines"}]`
        - Format as string: `existing_modules_str = json.dumps(existing_cluster_modules, indent=2)`
+       - Required imports: `import json` (for json.dumps)
        - Note: Module names should be unambiguous without `.py` suffix (e.g., `relative_dates` not `relative_dates.py`)
        - Format cluster_analysis from state: Get full cluster data from `state["node_output"]["error_clusters"]`, filter by `state["node_output"]["selected_clusters"]` (list of cluster_ids)
        - Create cluster_analysis dict: For each selected cluster_id, get the full cluster dict from error_clusters (includes cluster_id, error_indices, commonality, examples, suggested_approach, parsability, error_count)
@@ -387,6 +394,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Get code_plan from state: `code_plan = state["node_output"]["code_plan"]` (output from PLAN node)
        - Error handling: If code_plan is None or missing, log error and raise ValueError
        - Format code_plan as JSON string: `code_plan_str = json.dumps(code_plan, indent=2)`
+       - Required imports: `import json` (for json.dumps)
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.act`
        - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
        - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(code_plan=code_plan_str)`
@@ -400,7 +408,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Sanitize cluster IDs in extracted data: For each cluster_id key in cluster_modules and test_files, sanitize using `self._sanitize_cluster_id(cluster_id)` and update dictionaries (create new dicts with sanitized keys)
        - Store as dictionaries with sanitized cluster names (without `.py` suffix) as keys: `cluster_modules[sanitized_cluster_id] = code_string`, `test_files[sanitized_cluster_id] = test_code_string`
        - Validate cluster module structure: Each module must have:
-         - Required imports: `from datetime import datetime, timezone` (or `from datetime import datetime, timedelta, timezone` if needed)
+         - Required imports: `from datetime import datetime, timezone` (use `timezone.utc` for UTC timezone, e.g., `datetime.now(timezone.utc)`) (or `from datetime import datetime, timedelta, timezone` if needed)
          - Module docstring: `"""Parser module for {cluster_id} patterns."""`
          - Function signature: `def parse(text: str) -> datetime | None:`
          - Function must return `datetime` object (timezone-aware, UTC) or `None` (not raise exception on failure)
@@ -489,7 +497,10 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Get original errors: Read error queue and extract errors for failed clusters using cluster_error_indices
        - Create failed_batch_entry dict with structure:
          - `{"selected_clusters": list of cluster_ids, "cluster_error_indices": cluster_error_indices dict, "error_count": total error count, "test_results": test_results dict, "retry_count": retry_count, "timestamp": ISO timestamp string, "error_samples": list of sample error dicts (first 3 errors from each cluster)}`
+         - For timestamp: Use `from datetime import datetime, timezone; datetime.now(timezone.utc).isoformat()` to generate ISO timestamp string
        - Append to failed_batches.jsonl using JSONL format: `coding_agent.error_queue.append_error_to_queue("failed_batches.jsonl", failed_batch_entry)`
+       - Note: For hackathon MVP, failed_batches.jsonl path is hardcoded as "failed_batches.jsonl" (repository root, same directory as error_queue.jsonl)
+       - Required imports: `import json` (for json.dumps in append_error_to_queue), `from datetime import datetime, timezone` (for timestamp generation)
        - Error handling: If file write fails, log warning but don't raise exception (non-critical)
        - Test: Verify failed batches are logged correctly
 
@@ -652,6 +663,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
          ```
        - Cell: Build NodeLLMs: `NodeLLMs(reason=llm, plan=llm, act=llm, validate=llm)`
        - Cell: Generate thread_id: `thread_id = f"coding_agent_{uuid.uuid4().hex[:8]}"` or use timestamp-based ID
+       - Required imports: `import uuid` (for thread_id generation)
        - Cell: Initialize CodingAgentWorkflow:
          ```python
          from coding_agent.agent import CodingAgentWorkflow
