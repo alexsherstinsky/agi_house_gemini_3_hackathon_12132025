@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,14 +59,35 @@ def remove_processed_cluster_errors(
     Args:
         queue_path: Path to error queue JSONL file
         processed_cluster_indices: List of error indices to remove (0-based)
+        
+    Raises:
+        IOError: If file operations fail after retries
     """
     queue_file = Path(queue_path)
     
     if not queue_file.exists():
         return
     
-    # Read all errors
-    all_errors = read_error_queue(queue_path)
+    # Read all errors with shared lock
+    all_errors = []
+    for attempt in range(3):
+        try:
+            with open(queue_file, "r", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)  # Shared lock for reading
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            all_errors.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
+            break
+        except (IOError, OSError) as e:
+            if attempt < 2:
+                time.sleep(0.1)
+                continue
+            raise IOError(f"Failed to read queue file after 3 attempts: {e}") from e
     
     # Filter out processed cluster errors by index
     remaining_errors = [
@@ -71,10 +95,22 @@ def remove_processed_cluster_errors(
         if idx not in processed_cluster_indices
     ]
     
-    # Rewrite file
-    with open(queue_file, "w", encoding="utf-8") as f:
-        for error in remaining_errors:
-            f.write(json.dumps(error) + "\n")
+    # Write remaining errors with exclusive lock
+    for attempt in range(3):
+        try:
+            with open(queue_file, "w", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock for writing
+                for error in remaining_errors:
+                    f.write(json.dumps(error) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
+            break
+        except (IOError, OSError) as e:
+            if attempt < 2:
+                time.sleep(0.1)
+                continue
+            raise IOError(f"Failed to write queue file after 3 attempts: {e}") from e
 
 
 def append_error_to_queue(
@@ -86,9 +122,24 @@ def append_error_to_queue(
     Args:
         queue_path: Path to error queue JSONL file
         error: Error dictionary to append
+        
+    Raises:
+        IOError: If file operations fail after retries
     """
     queue_file = Path(queue_path)
     
-    with open(queue_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(error) + "\n")
+    for attempt in range(3):
+        try:
+            with open(queue_file, "a", encoding="utf-8") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)  # Exclusive lock
+                f.write(json.dumps(error) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Release lock
+            break
+        except (IOError, OSError) as e:
+            if attempt < 2:
+                time.sleep(0.1)
+                continue
+            raise IOError(f"Failed to append to queue file after 3 attempts: {e}") from e
 
