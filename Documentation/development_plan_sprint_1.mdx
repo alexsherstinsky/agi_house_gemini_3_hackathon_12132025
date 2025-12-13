@@ -235,11 +235,23 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    5.1 **Create CodingAgentWorkflow class skeleton** [M]
        - File: `coding_agent/agent.py`
        - Extend `WorkflowBase` from `coding_agent.base`
-       - Implement `__init__()`: Accept error_queue_path, parsers_dir, tests_dir, llm configuration, prompts, thread_id
-       - Store configuration as instance variables (error_queue_path, parsers_dir, tests_dir)
-       - Call `super().__init__()` with node_llms, node_prompts, thread_id, and other WorkflowBase parameters
-       - Import required dependencies: WorkflowBase, AnnotationState, NodeLLMs, NodePrompts, etc.
+       - Implement `__init__()`: Accept parameters:
+         - `error_queue_path: str | Path` - Path to error queue JSONL file
+         - `parsers_dir: str | Path` - Directory for cluster parser modules
+         - `tests_dir: str | Path` - Directory for test files
+         - `node_llms: NodeLLMs` - LLM configuration for each node
+         - `node_prompts: NodePrompts` - Prompt templates for each node
+         - `thread_id: str` - Unique thread identifier
+         - `rate_limiting_config: RateLimitingConfig = DEFAULT_RATE_LIMITING_CONFIG` - Rate limiting config (from coding_agent.base)
+         - `fail_fast: bool = False` - Whether to fail fast on errors
+         - `error_logging: bool = True` - Whether to log errors
+         - `debug_logging: bool = False` - Whether to enable debug logging
+         - `enforce_structured_llm_output: bool = False` - Whether to enforce structured output (should be False for schema=None)
+       - Store configuration as instance variables: `self._error_queue_path`, `self._parsers_dir`, `self._tests_dir`
+       - Call `super().__init__()` with: `node_llms`, `node_prompts`, `thread_id`, `enforce_structured_llm_output`, `rate_limiting_config`, `fail_fast`, `error_logging`, `debug_logging`
+       - Import required dependencies: WorkflowBase, AnnotationState, NodeLLMs, NodePrompts, RateLimitingConfig, DEFAULT_RATE_LIMITING_CONFIG, etc.
        - Note: No custom state class needed - use `AnnotationState` and store custom data in `state["node_output"]` dict
+       - Note: error_queue_path, parsers_dir, tests_dir are instance variables (not stored in state)
        - Test: Verify class can be instantiated
 
    5.2 **Implement _add_workflow_nodes_and_edges method** [M]
@@ -256,20 +268,27 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    6.1 **Implement _reason_node method** [M]
        - File: `coding_agent/agent.py`
        - Method signature: `def _reason_node(self, state: AnnotationState) -> AnnotationState:`
-       - Read error queue using `coding_agent.error_queue.read_error_queue(self._error_queue_path)`
-       - Filter errors: Only include rows where `deadline_at` is null (parsing failures - these are the errors we want to fix)
-       - Format error queue contents as JSONL string: `error_queue_contents = "\n".join(json.dumps(error) for error in errors)`
+       - Read full error queue using `coding_agent.error_queue.read_error_queue(self._error_queue_path)` - store as `all_errors`
+       - Filter errors: Only include rows where `deadline_at` is null (parsing failures - these are the errors we want to fix) - store as `filtered_errors`
+       - Create mapping from filtered index to global index: `filtered_to_global = {filtered_idx: global_idx for global_idx, error in enumerate(all_errors) if error.get("deadline_at") is None}`
+       - Error handling: If no errors found, log warning and return state with empty clusters
+       - Format error queue contents as JSONL string: `error_queue_contents = "\n".join(json.dumps(error) for error in filtered_errors)`
        - Note: Each line in error_queue_contents should be a complete JSON object with `timing_description` field (the text that failed to parse)
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.reason`
        - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
        - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(error_queue_contents=error_queue_contents)`
        - Call LLM: `response = self._call_llm_with_prompt(node_name="reason", system_prompt=system_prompt, user_prompt=user_prompt, schema=None)`
+       - Error handling: If LLM call fails, log error and raise exception (or handle based on fail_fast setting)
        - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(response.content, fail_fast=self._fail_fast, context_identifier=("Node", "reason"), debug_logging=self._debug_logging)`
        - Returns: `list[dict[str, Any]] | None`
-       - Extract data: Use helper function from `utils.llm_output_parsing_util` to extract clusters and selected_clusters from parsed response
-       - Store in state: `node_output = state["node_output"] or {}`, set `node_output["error_clusters"]` (list of cluster dicts) and `node_output["selected_clusters"]` (list of cluster_ids)
-       - Also store `node_output["cluster_error_indices"]` as dict mapping cluster_id to list of error indices (global indices from original queue)
-       - Call `self._update_state(state, messages=[...], node_output=node_output)` and return updated state
+       - Error handling: If parsed_response is None or empty, log error and raise ValueError (or handle based on fail_fast)
+       - Extract data: Use helper function from `utils.llm_output_parsing_util.extract_reason_node_output(parsed_response)` to extract clusters and selected_clusters
+       - Error handling: If helper function returns None or missing required keys, log error and raise ValueError
+       - Map error indices from filtered to global: For each cluster in extracted data, convert error_indices (which are relative to filtered_errors) to global indices using `filtered_to_global` mapping
+       - Store in state: `node_output = state["node_output"] or {}`, set `node_output["error_clusters"]` (list of cluster dicts with cluster_id, error_indices [now global], commonality, examples, etc.) and `node_output["selected_clusters"]` (list of cluster_ids)
+       - Also store `node_output["cluster_error_indices"]` as dict mapping cluster_id to list of global error indices: `{cluster["cluster_id"]: [filtered_to_global[idx] for idx in cluster["error_indices"]] for cluster in extracted_data["clusters"] if cluster["cluster_id"] in extracted_data["selected_clusters"]}`
+       - Construct messages for state update: `from langchain_core.messages import SystemMessage, HumanMessage; system_message = SystemMessage(content=system_prompt); human_message = HumanMessage(content=user_prompt); messages = [system_message, human_message, response]`
+       - Call `self._update_state(state, messages=messages, node_output=node_output)` and return updated state
        - Test: Verify REASON node clusters errors correctly with mock LLM response
 
 ### 7.0 Implement PLAN Node [M]
@@ -278,18 +297,25 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - File: `coding_agent/agent.py`
        - Method signature: `def _plan_node(self, state: AnnotationState) -> AnnotationState:`
        - Read existing cluster modules from parsers_dir: List `.py` files (excluding `__init__.py`), read each file, extract brief description
-       - Format cluster_analysis from state: `cluster_analysis = json.dumps(state["node_output"]["selected_clusters"], indent=2)` (output from REASON node)
-       - Format existing_cluster_modules: Create list of dicts with module name (without `.py` suffix, just the stem) and brief description
+       - Format existing_cluster_modules: Create list of dicts with structure: `[{"module_name": "relative_dates", "description": "Brief description extracted from module docstring or first few lines"}]`
        - Format as string: `existing_modules_str = json.dumps(existing_cluster_modules, indent=2)`
        - Note: Module names should be unambiguous without `.py` suffix (e.g., `relative_dates` not `relative_dates.py`)
+       - Format cluster_analysis from state: Get full cluster data from `state["node_output"]["error_clusters"]`, filter by `state["node_output"]["selected_clusters"]` (list of cluster_ids)
+       - Create cluster_analysis dict: For each selected cluster_id, get the full cluster dict from error_clusters (includes cluster_id, error_indices, commonality, examples, suggested_approach, parsability, error_count)
+       - Format as string: `cluster_analysis = json.dumps([cluster for cluster in error_clusters if cluster["cluster_id"] in selected_clusters], indent=2)`
+       - Error handling: If selected_clusters is empty or None, log warning and return state with empty code_plan
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.plan`
        - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
        - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(cluster_analysis=cluster_analysis, existing_cluster_modules=existing_modules_str)`
        - Call LLM: `response = self._call_llm_with_prompt(node_name="plan", system_prompt=system_prompt, user_prompt=user_prompt, schema=None)`
+       - Error handling: If LLM call fails, log error and raise exception (or handle based on fail_fast setting)
        - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(...)` as in REASON node
-       - Extract code_plan: Use helper function from `utils.llm_output_parsing_util` to extract code_plan dict (should have cluster_plans array)
+       - Error handling: If parsed_response is None or empty, log error and raise ValueError
+       - Extract code_plan: Use helper function from `utils.llm_output_parsing_util.extract_plan_node_output(parsed_response)` to extract code_plan dict (should have cluster_plans array)
+       - Error handling: If helper function returns None or missing cluster_plans key, log error and raise ValueError
        - Update state: `node_output = state["node_output"] or {}`, set `node_output["code_plan"] = code_plan`
-       - Call `self._update_state(state, messages=[...], node_output=node_output)` and return updated state
+       - Construct messages for state update: `from langchain_core.messages import SystemMessage, HumanMessage; system_message = SystemMessage(content=system_prompt); human_message = HumanMessage(content=user_prompt); messages = [system_message, human_message, response]`
+       - Call `self._update_state(state, messages=messages, node_output=node_output)` and return updated state
        - Test: Verify PLAN node creates code plans correctly with mock LLM response
 
 ### 8.0 Implement ACT Node [M]
@@ -298,20 +324,26 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - File: `coding_agent/agent.py`
        - Method signature: `def _act_node(self, state: AnnotationState) -> AnnotationState:`
        - Get code_plan from state: `code_plan = state["node_output"]["code_plan"]` (output from PLAN node)
+       - Error handling: If code_plan is None or missing, log error and raise ValueError
        - Format code_plan as JSON string: `code_plan_str = json.dumps(code_plan, indent=2)`
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.act`
        - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
        - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(code_plan=code_plan_str)`
        - Call LLM: `response = self._call_llm_with_prompt(node_name="act", system_prompt=system_prompt, user_prompt=user_prompt, schema=None)`
+       - Error handling: If LLM call fails, log error and raise exception (or handle based on fail_fast setting)
        - Parse JSON: Use `self._llm_json_parser.parse_llm_json_extraction_response(...)` as in REASON node
-       - Extract cluster_modules and test_files: Use helper function from `utils.llm_output_parsing_util` to extract dictionaries from parsed response
+       - Error handling: If parsed_response is None or empty, log error and raise ValueError
+       - Extract cluster_modules and test_files: Use helper function from `utils.llm_output_parsing_util.extract_act_node_output(parsed_response)` to extract dictionaries from parsed response
+       - Error handling: If helper function returns None or missing cluster_modules/test_files keys, log error and raise ValueError
        - Store as dictionaries with cluster names (without `.py` suffix) as keys: `cluster_modules[cluster_id] = code_string`, `test_files[cluster_id] = test_code_string`
        - Write cluster module files: For each cluster_id in cluster_modules, write to `Path(self._parsers_dir) / f"{cluster_id}.py"`
        - Write test files: For each cluster_id in test_files, write to `Path(self._tests_dir) / f"test_{cluster_id}.py"`
        - Use `_write_file_with_lock()` helper for atomic file writing
+       - Error handling: If file writing fails, log error and raise IOError (or handle based on fail_fast)
        - Update state: `node_output = state["node_output"] or {}`, set `node_output["generated_cluster_modules"] = cluster_modules` and `node_output["generated_test_files"] = test_files` (both as dicts with cluster_id keys)
-       - Cluster error indices already stored in REASON node: `node_output["cluster_error_indices"]` (dict mapping cluster_id to list of error indices)
-       - Call `self._update_state(state, messages=[...], node_output=node_output)` and return updated state
+       - Cluster error indices already stored in REASON node: `node_output["cluster_error_indices"]` (dict mapping cluster_id to list of global error indices)
+       - Construct messages for state update: `from langchain_core.messages import SystemMessage, HumanMessage; system_message = SystemMessage(content=system_prompt); human_message = HumanMessage(content=user_prompt); messages = [system_message, human_message, response]`
+       - Call `self._update_state(state, messages=messages, node_output=node_output)` and return updated state
        - Test: Verify ACT node generates and writes files correctly with mock LLM response
 
    8.2 **Add file writing helper with locking** [S]
@@ -328,12 +360,22 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - File: `coding_agent/agent.py`
        - Method signature: `def _validate_node(self, state: AnnotationState) -> AnnotationState:`
        - Use `coding_agent.test_runner.run_pytest(self._tests_dir)` to run tests
-       - Parse test results: `test_results = {"all_passed": returncode == 0, "test_output": output, "returncode": returncode}`
+       - Note: `run_pytest()` returns dict with keys: `all_passed` (bool), `test_output` (str), `test_errors` (str), `returncode` (int)
+       - Error handling: If pytest execution fails (exception), log error and set test_results with all_passed=False
+       - Parse test results: `test_results = run_pytest_result` (already in correct format)
        - Get current retry_count: `retry_count = state["node_output"].get("retry_count", 0)`
        - Increment retry_count: `retry_count += 1`
        - Update state: `node_output = state["node_output"] or {}`, set `node_output["test_results"] = test_results` and `node_output["retry_count"] = retry_count`
-       - If tests pass, set final_output: `state["final_output"] = node_output` (or create final output dict with success info)
-       - Update state and return
+       - If tests pass (test_results["all_passed"] is True):
+         - Perform queue cleanup first (see Task 10.1): Collect error indices from `node_output["cluster_error_indices"]`, flatten, remove from queue, calculate `errors_removed_count`
+         - Perform module reloading (see Task 10.2): Call `coding_agent.reloader.reload_parser(self._parsers_dir)` (return value can be ignored - caller will create new TimeParser instance)
+         - Get processed_clusters: `processed_clusters = node_output.get("selected_clusters", [])` (all selected clusters are processed if tests pass)
+         - Calculate errors_removed_count: `errors_removed_count = sum(len(indices) for indices in node_output.get("cluster_error_indices", {}).values())`
+         - Create final_output dict with structure matching design doc Section 4.2:
+           - `final_output = {"success": True, "processed_clusters": processed_clusters, "errors_removed_count": errors_removed_count, "parser_updated": True, "tests_passed": True, "retry_count": retry_count, "generated_cluster_modules": node_output.get("generated_cluster_modules", {}), "generated_test_files": node_output.get("generated_test_files", {}), "cluster_error_indices": node_output.get("cluster_error_indices", {})}`
+         - Set `state["final_output"] = final_output`
+         - Update `node_output["errors_removed_count"] = errors_removed_count` and `node_output["parser_reloaded"] = True`
+       - Update state and return (no messages needed for VALIDATE node - it doesn't call LLM)
        - Test: Verify VALIDATE node runs pytest and parses results correctly
 
    9.2 **Implement _should_retry method** [S]
@@ -349,29 +391,36 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
    9.3 **Implement _log_failed_batch method** [S]
        - File: `coding_agent/agent.py`
-       - Create failed_batch_entry dict with error_batch, test_results, timestamp, retry_count
-       - Append to failed_batches.jsonl using JSONL format
-       - Use `coding_agent.error_queue.append_error_to_queue()` pattern
+       - Method signature: `def _log_failed_batch(self, state: AnnotationState) -> None:`
+       - Get data from state: `selected_clusters = state["node_output"].get("selected_clusters", [])`, `test_results = state["node_output"].get("test_results", {})`, `retry_count = state["node_output"].get("retry_count", 0)`, `cluster_error_indices = state["node_output"].get("cluster_error_indices", {})`
+       - Get original errors: Read error queue and extract errors for failed clusters using cluster_error_indices
+       - Create failed_batch_entry dict with structure:
+         - `{"selected_clusters": list of cluster_ids, "cluster_error_indices": cluster_error_indices dict, "error_count": total error count, "test_results": test_results dict, "retry_count": retry_count, "timestamp": ISO timestamp string, "error_samples": list of sample error dicts (first 3 errors from each cluster)}`
+       - Append to failed_batches.jsonl using JSONL format: `coding_agent.error_queue.append_error_to_queue("failed_batches.jsonl", failed_batch_entry)`
+       - Error handling: If file write fails, log warning but don't raise exception (non-critical)
        - Test: Verify failed batches are logged correctly
 
 ### 10.0 Implement Queue Cleanup and Module Reloading [M]
 
    10.1 **Add queue cleanup after successful validation** [M]
        - File: `coding_agent/agent.py`
-       - In VALIDATE node, after tests pass, collect error indices from `state["node_output"]["cluster_error_indices"]`
-       - This dict maps cluster_id to list of error indices (global indices from original queue)
+       - Note: This is called from VALIDATE node (Task 9.1) after tests pass, before creating final_output
+       - Collect error indices from `state["node_output"]["cluster_error_indices"]`
+       - This dict maps cluster_id to list of error indices (global indices from original queue, mapped in REASON node)
        - Flatten all error indices from all clusters into a single list: `all_error_indices = [idx for indices in cluster_error_indices.values() for idx in indices]`
        - Use `coding_agent.error_queue.remove_processed_cluster_errors(self._error_queue_path, all_error_indices)` to remove errors
-       - Update state: `node_output["errors_removed_count"] = len(all_error_indices)`
-       - Note: Error indices are tracked through the workflow - REASON node stores global indices in `cluster_error_indices` dict
+       - Calculate errors_removed_count: `errors_removed_count = len(all_error_indices)`
+       - Note: Error indices are tracked through the workflow - REASON node maps filtered indices to global indices and stores in `cluster_error_indices` dict
        - Test: Verify processed errors are removed from queue correctly
 
    10.2 **Add module reloading after successful validation** [S]
        - File: `coding_agent/agent.py`
-       - After successful validation and queue cleanup in VALIDATE node, call `coding_agent.reloader.reload_parser(self._parsers_dir)`
-       - This reloads all cluster modules using `importlib.reload()`
-       - Note: The actual TimeParser instance reload should be done by the caller after workflow completes, or expose a reload method
-       - Update state: `node_output["parser_reloaded"] = True`
+       - Note: This is called from VALIDATE node (Task 9.1) after queue cleanup, before creating final_output
+       - Call `coding_agent.reloader.reload_parser(self._parsers_dir)` to reload all cluster modules
+       - Note: `reload_parser()` returns a TimeParser instance, but the return value can be ignored in the workflow
+       - Note: The caller (notebook or application code) should create a new TimeParser instance after workflow completes to use the updated modules
+       - This reloads all cluster modules using `importlib.reload()` and refreshes the main parser module
+       - Update state: `node_output["parser_reloaded"] = True` (done in VALIDATE node)
        - Test: Verify modules are reloaded and parser works with new modules
 
 ### 11.0 Create LLM Output Parsing Utilities [M]
@@ -382,15 +431,21 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Functions should extract data from `list[dict[str, Any]] | None` returned by JSON parser
        - Add function: `extract_reason_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
          - Extracts clusters, selected_clusters, and other fields from REASON node response
-         - Returns dict with keys: `clusters`, `selected_clusters`, `total_errors_analyzed`, etc.
+         - Error handling: If parsed_response is None or empty, return empty dict with default values or raise ValueError (document behavior)
+         - Error handling: If first dict in list is missing required keys (clusters, selected_clusters), log warning and return partial data or raise ValueError
+         - Returns dict with keys: `clusters` (list of cluster dicts), `selected_clusters` (list of cluster_ids), `total_errors_analyzed` (int), `total_clusters_identified` (int), `clusters_selected_count` (int)
        - Add function: `extract_plan_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
          - Extracts code_plan with cluster_plans array from PLAN node response
-         - Returns dict with key: `cluster_plans` (list of plan dicts)
+         - Error handling: If parsed_response is None or empty, return empty dict or raise ValueError
+         - Error handling: If missing cluster_plans key, log warning and return empty dict or raise ValueError
+         - Returns dict with key: `cluster_plans` (list of plan dicts, each with cluster_id, parsing_strategy, code_structure, test_cases, dependencies, edge_cases)
        - Add function: `extract_act_node_output(parsed_response: list[dict[str, Any]] | None) -> dict[str, Any]`
          - Extracts cluster_modules and test_files dictionaries from ACT node response
+         - Error handling: If parsed_response is None or empty, return empty dict or raise ValueError
+         - Error handling: If missing cluster_modules or test_files keys, log warning and return partial data or raise ValueError
          - Returns dict with keys: `cluster_modules` (dict mapping cluster_id to code string), `test_files` (dict mapping cluster_id to test code string)
        - Note: Pattern similar to examples in `DO_NOT_COMMIT/ai_aided_annotations/util.py` but adapted for our use case
-       - Handle edge cases: empty lists, None responses, missing keys
+       - Error handling strategy: Log warnings for missing optional keys, raise ValueError for missing required keys (or return empty dicts based on fail_fast parameter if added)
        - Test: Verify parsing functions extract data correctly from various JSON response formats
 
 ### 12.0 Create Test Infrastructure [M]
@@ -446,13 +501,15 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    13.4 **Add agent activation demonstration** [M]
        - File: `notebooks/demo.ipynb`
        - Cell: Check error count threshold (use `coding_agent.error_queue.get_error_count()`)
-       - Cell: Build NodePrompts using `build_node_prompts()` function with formatted prompts
+       - Cell: Build NodePrompts using `build_node_prompts()` function (returns NodePrompts with template user prompts, not formatted)
        - Cell: Build NodeLLMs: `NodeLLMs(reason=llm, plan=llm, act=llm, validate=llm)`
        - Cell: Generate thread_id: `thread_id = f"coding_agent_{uuid.uuid4().hex[:8]}"` or use timestamp-based ID
-       - Cell: Initialize CodingAgentWorkflow: `workflow = CodingAgentWorkflow(node_llms=..., node_prompts=..., thread_id=..., error_queue_path=..., parsers_dir=..., tests_dir=..., ...)`
+       - Cell: Initialize CodingAgentWorkflow: `workflow = CodingAgentWorkflow(node_llms=..., node_prompts=..., thread_id=..., error_queue_path=..., parsers_dir=..., tests_dir=..., rate_limiting_config=..., fail_fast=..., error_logging=..., debug_logging=...)`
+       - Note: error_queue_path, parsers_dir, tests_dir are instance variables (not in initial state)
        - Cell: Create initial state: `initial_state = AnnotationState(messages=[], node_output=None, final_output=None)`
        - Cell: Run agent workflow: `result = workflow.run(initial_state=initial_state)`
-       - Cell: Display agent results (processed clusters, errors removed, etc.) from result dict
+       - Cell: Display agent results from result dict (keys: success, processed_clusters, errors_removed_count, parser_updated, tests_passed, retry_count, generated_cluster_modules, generated_test_files, cluster_error_indices)
+       - Note: `workflow.run()` returns `final_state["final_output"] or {}` - see design doc Section 4.2 for exact structure
        - Test: Verify agent runs successfully
 
    13.5 **Add success verification demonstration** [S]
