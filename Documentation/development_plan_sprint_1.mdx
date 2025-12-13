@@ -306,8 +306,20 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Set entry point: `workflow.add_edge(START, "reason")` (START is imported from langgraph.graph)
        - Add sequential edges: `workflow.add_edge("reason", "plan")`, `workflow.add_edge("plan", "act")`, `workflow.add_edge("act", "validate")`
        - Add conditional edge from validate: `workflow.add_conditional_edges("validate", self._should_retry, {"success": END, "retry": "plan", "failure": END})` (END is imported from langgraph.graph)
+       - Add conditional edge from reason: `workflow.add_conditional_edges("reason", self._check_early_exit, {"continue": "plan", "exit": END})` (check for early_exit flag in state)
+       - Add conditional edge from plan: `workflow.add_conditional_edges("plan", self._check_early_exit, {"continue": "act", "exit": END})` (check for early_exit flag in state)
+       - Add conditional edge from act: `workflow.add_conditional_edges("act", self._check_early_exit, {"continue": "validate", "exit": END})` (check for early_exit flag in state)
        - Note: `_should_retry()` method should return "success", "retry", or "failure" based on test results and retry count
+       - Note: `_check_early_exit()` method should return "exit" if `state["node_output"].get("early_exit")` is True, otherwise "continue"
        - Test: Verify workflow graph structure is correct
+
+   5.3 **Implement _check_early_exit helper method** [S]
+       - File: `coding_agent/agent.py`
+       - Method signature: `def _check_early_exit(self, state: AnnotationState) -> str:`
+       - Check if early exit flag is set: `if state["node_output"].get("early_exit") is True:`
+       - If True, return "exit" (workflow routes to END)
+       - Otherwise, return "continue" (workflow continues to next node)
+       - Test: Verify early exit routing works correctly
 
 ### 6.0 Implement REASON Node [M]
 
@@ -316,12 +328,22 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Method signature: `def _reason_node(self, state: AnnotationState) -> AnnotationState:`
        - Read full error queue using `coding_agent.error_queue.read_error_queue(self._error_queue_path)` - store as `all_errors`
        - Filter errors: Only include rows where `deadline_at` is null (parsing failures - these are the errors we want to fix) - store as `filtered_errors`
-       - Create mapping from filtered index to global index: `filtered_to_global = {filtered_idx: global_idx for global_idx, error in enumerate(all_errors) if error.get("deadline_at") is None}`
-       - Error handling: If no errors found, log warning and return state with empty clusters:
+       - Create mapping from filtered index to global index: Build dict mapping filtered_errors index to all_errors index:
+         ```python
+         filtered_to_global = {}
+         filtered_idx = 0
+         for global_idx, error in enumerate(all_errors):
+             if error.get("deadline_at") is None:
+                 filtered_to_global[filtered_idx] = global_idx
+                 filtered_idx += 1
+         ```
+       - Error handling: If no errors found (filtered_errors is empty), log warning and set early exit:
          - Set `node_output["error_clusters"] = []` (empty list)
          - Set `node_output["selected_clusters"] = []` (empty list)
          - Set `node_output["cluster_error_indices"] = {}` (empty dict)
-         - Workflow will continue but no clusters will be processed (subsequent nodes should handle empty clusters gracefully)
+         - Set `node_output["early_exit"] = True` (flag for early exit)
+         - Set `state["final_output"] = {"success": True, "processed_clusters": [], "errors_removed_count": 0, "parser_updated": False, "tests_passed": False, "retry_count": 0, "message": "No errors to process"}`
+         - Return state (workflow will route to END via conditional edge check)
        - Format error queue contents as JSONL string: `error_queue_contents = "\n".join(json.dumps(error) for error in filtered_errors)`
        - Required imports: `import json` (for json.dumps)
        - Note: Each line in error_queue_contents should be a complete JSON object with `timing_description` field (the text that failed to parse)
@@ -365,10 +387,15 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Format as string: `existing_modules_str = json.dumps(existing_cluster_modules, indent=2)`
        - Required imports: `import json` (for json.dumps)
        - Note: Module names should be unambiguous without `.py` suffix (e.g., `relative_dates` not `relative_dates.py`)
+       - Check for early exit: If `state["node_output"].get("early_exit")` is True, return state unchanged (workflow will route to END)
        - Format cluster_analysis from state: Get full cluster data from `state["node_output"]["error_clusters"]`, filter by `state["node_output"]["selected_clusters"]` (list of cluster_ids)
        - Create cluster_analysis dict: For each selected cluster_id, get the full cluster dict from error_clusters (includes cluster_id, error_indices, commonality, examples, suggested_approach, parsability, error_count)
        - Format as string: `cluster_analysis = json.dumps([cluster for cluster in error_clusters if cluster["cluster_id"] in selected_clusters], indent=2)`
-       - Error handling: If selected_clusters is empty or None, log warning and return state with empty code_plan
+       - Error handling: If selected_clusters is empty or None, log warning and set early exit:
+         - Set `node_output["code_plan"] = {}` (empty dict)
+         - Set `node_output["early_exit"] = True`
+         - Set `state["final_output"] = {"success": True, "processed_clusters": [], "errors_removed_count": 0, "parser_updated": False, "tests_passed": False, "retry_count": 0, "message": "No clusters selected for processing"}`
+         - Return state (workflow will route to END)
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.plan`
        - Extract: `system_prompt = system_and_user_prompt_pair.system_prompt` (constant, no formatting)
        - Format user prompt in node: `user_prompt = system_and_user_prompt_pair.user_prompt.format(cluster_analysis=cluster_analysis, existing_cluster_modules=existing_modules_str)`
@@ -379,6 +406,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Error handling: If parsed_response is None or empty, log error and raise ValueError
        - Extract code_plan: Use helper function from `utils.llm_output_parsing_util.extract_plan_node_output(parsed_response)` to extract code_plan dict (should have cluster_plans array)
        - Error handling: If helper function returns None or missing cluster_plans key, log error and raise ValueError
+       - Error handling: If `code_plan.get("cluster_plans")` is empty list, log error and raise ValueError with message "code_plan has empty cluster_plans array"
        - Update state: `node_output = state["node_output"] or {}`, set `node_output["code_plan"] = code_plan`
        - Construct messages for state update: `from langchain_core.messages import SystemMessage, HumanMessage; system_message = SystemMessage(content=system_prompt); human_message = HumanMessage(content=user_prompt); messages = [system_message, human_message, response]`
        - Call `self._update_state(state, messages=messages, node_output=node_output)` (modifies state in place, returns None)
@@ -391,8 +419,10 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
    8.1 **Implement _act_node method** [M]
        - File: `coding_agent/agent.py`
        - Method signature: `def _act_node(self, state: AnnotationState) -> AnnotationState:`
+       - Check for early exit: If `state["node_output"].get("early_exit")` is True, return state unchanged (workflow will route to END)
        - Get code_plan from state: `code_plan = state["node_output"]["code_plan"]` (output from PLAN node)
        - Error handling: If code_plan is None or missing, log error and raise ValueError
+       - Error handling: If code_plan exists but `code_plan.get("cluster_plans")` is empty list, log error and raise ValueError with message "code_plan has no cluster_plans to generate code for"
        - Format code_plan as JSON string: `code_plan_str = json.dumps(code_plan, indent=2)`
        - Required imports: `import json` (for json.dumps)
        - Get prompts: `system_and_user_prompt_pair = self._node_prompts.act`
@@ -420,6 +450,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
          - Assertions: Check that `parse(input_text)` returns non-None datetime, is timezone-aware, is UTC
          - Use `time_parser.tests.test_utils.assert_valid_datetime()` helper if available
        - Write cluster module files: For each sanitized cluster_id in cluster_modules, write to `Path(self._parsers_dir) / f"{sanitized_cluster_id}.py"`
+         - Required imports: `from pathlib import Path` (for Path operations)
          - Note: If file already exists, it will be overwritten (new cluster modules replace old ones)
        - Write test files: For each sanitized cluster_id in test_files, write to `Path(self._tests_dir) / f"test_{sanitized_cluster_id}.py"`
          - Note: If test file already exists, it will be overwritten (new test files replace old ones)
