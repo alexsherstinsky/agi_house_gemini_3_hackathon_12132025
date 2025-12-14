@@ -223,6 +223,11 @@ class LLMJsonParser:
         if is_valid_json(json_string=repaired_text):
             return repaired_text
 
+        # Try repairing newlines in string values (common in multi-line code strings)
+        repaired_text = self._repair_newlines_in_strings(text=repaired_text)
+        if is_valid_json(json_string=repaired_text):
+            return repaired_text
+
         return repaired_text
 
     def _remove_trailing_commas(self, text: str) -> str:
@@ -302,6 +307,38 @@ class LLMJsonParser:
         text = re.sub(r",\s*}", "}", text)
         return text
 
+    def _repair_newlines_in_strings(self, text: str) -> str:
+        """Repair literal newlines in JSON string values by escaping them.
+
+        Args:
+            text: The JSON text to repair.
+
+        Returns:
+            The repaired JSON text with newlines escaped in string values.
+        """
+        # Use regex to find and replace newlines inside JSON string values
+        # Pattern matches: "..." where content can contain escaped quotes and characters
+        def escape_newlines_in_match(match):
+            full_match = match.group(0)
+            # Split into opening quote, content, and closing quote
+            # Escape newlines, carriage returns, and tabs in the content (but not in the quotes)
+            # Don't double-escape already escaped sequences
+            content_start = 1  # After opening quote
+            content_end = len(full_match) - 1  # Before closing quote
+            if content_end > content_start:
+                content = full_match[content_start:content_end]
+                # Replace literal newlines with escaped ones, but skip if already escaped
+                # This is a simplified approach - it might double-escape in some edge cases
+                content = content.replace('\r\n', '\\n').replace('\n', '\\n').replace('\r', '\\n').replace('\t', '\\t')
+                return '"' + content + '"'
+            return full_match
+        
+        # Match JSON string values: "..." handling escaped quotes and backslashes
+        # This regex matches: " followed by any characters (including escaped ones) until closing "
+        pattern = r'"(?:[^"\\]|\\.)*"'
+        
+        return re.sub(pattern, escape_newlines_in_match, text)
+
     def _parse_json_or_jsonl(
         self, text: str, fail_fast: bool, tag: str, context: str
     ) -> list[dict[str, Any]] | None:
@@ -316,29 +353,43 @@ class LLMJsonParser:
         Returns:
             List of parsed dictionaries, or None if parsing fails.
         """
-        # First, try full JSON block.
-        if is_valid_json(json_string=text):
-            try:
-                logger.debug(
-                    f"[{tag}] Attempting full JSON block parse (text length: {len(text)} chars)"
-                )
-                parsed: (
-                    dict[str, Any]
-                    | list[dict[str, Any]]
-                    | str
-                    | int
-                    | float
-                    | bool
-                    | None
-                ) = self._json_output_parser.parse(text=text)
-                logger.debug(
-                    f"[{tag}] Full JSON block parse succeeded, type: {type(parsed).__name__}"
-                )
-                return self._normalize_output(parsed=parsed, tag=tag, context=context)
-            except OutputParserException as e:
-                logger.debug(
-                    f"[{tag}] Full block JSON parse failed: {e}. Falling back to JSONL parsing."
-                )
+        # First, try full JSON block - attempt parse even if is_valid_json returns False
+        # (sometimes is_valid_json is too strict, but actual parsing might work)
+        try:
+            logger.debug(
+                f"[{tag}] Attempting full JSON block parse (text length: {len(text)} chars)"
+            )
+            parsed: (
+                dict[str, Any]
+                | list[dict[str, Any]]
+                | str
+                | int
+                | float
+                | bool
+                | None
+            ) = self._json_output_parser.parse(text=text)
+            logger.debug(
+                f"[{tag}] Full JSON block parse succeeded, type: {type(parsed).__name__}"
+            )
+            return self._normalize_output(parsed=parsed, tag=tag, context=context)
+        except OutputParserException as e:
+            # Try direct json.loads as fallback (more lenient than JsonOutputParser)
+            if debug_logging:
+                import json as json_module
+                try:
+                    direct_parsed = json_module.loads(text)
+                    logger.debug(
+                        f"[{tag}] Direct json.loads succeeded, type: {type(direct_parsed).__name__}"
+                    )
+                    return self._normalize_output(parsed=direct_parsed, tag=tag, context=context)
+                except json_module.JSONDecodeError as json_err:
+                    logger.debug(
+                        f"[{tag}] JSON decode error: {json_err.msg} at line {json_err.lineno}, col {json_err.colno}. "
+                        f"Error context: {text[max(0, json_err.pos-50):json_err.pos+50]}"
+                    )
+            logger.debug(
+                f"[{tag}] Full block JSON parse failed: {e}. Falling back to JSONL parsing."
+            )
 
         # Try JSONL (line-delimited).
         logger.debug(
