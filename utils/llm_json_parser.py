@@ -189,7 +189,113 @@ class LLMJsonParser:
             flags=re.MULTILINE,
         )
 
+        text = text.strip()
+        
+        # If text doesn't start with { or [, try to extract JSON block from within the text
+        # This handles cases where LLMs add explanatory text before the JSON block
+        if text and not (text.startswith('{') or text.startswith('[')):
+            extracted = self._extract_json_block(text)
+            if extracted:
+                text = extracted
+        
         return text.strip()
+
+    def _extract_json_block(self, text: str) -> str | None:
+        """Extract the first JSON block (object or array) from text that may have leading/trailing text.
+        
+        This method finds the first '{' or '[' and extracts the complete JSON block
+        by matching brackets. This is useful when LLMs add explanatory text before
+        or after the JSON block.
+        
+        Args:
+            text: The text that may contain a JSON block.
+            
+        Returns:
+            The extracted JSON block as a string, or None if no valid block is found.
+        """
+        # Find the first opening brace or bracket
+        first_brace = text.find('{')
+        first_bracket = text.find('[')
+        
+        # Determine which comes first and what type of block we're extracting
+        if first_brace == -1 and first_bracket == -1:
+            return None
+        
+        if first_brace == -1:
+            start_pos = first_bracket
+            open_char = '['
+            close_char = ']'
+        elif first_bracket == -1:
+            start_pos = first_brace
+            open_char = '{'
+            close_char = '}'
+        else:
+            # Both found, use whichever comes first
+            if first_brace < first_bracket:
+                start_pos = first_brace
+                open_char = '{'
+                close_char = '}'
+            else:
+                start_pos = first_bracket
+                open_char = '['
+                close_char = ']'
+        
+        # Extract from the opening brace/bracket
+        # Track depth for both braces and brackets to handle nested structures
+        brace_depth = 0
+        bracket_depth = 0
+        in_string = False
+        escape_next = False
+        
+        for i in range(start_pos, len(text)):
+            char = text[i]
+            
+            if escape_next:
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+            
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            
+            if in_string:
+                continue
+            
+            # Track both types of brackets/braces for nested structures
+            if char == '{':
+                brace_depth += 1
+            elif char == '}':
+                brace_depth -= 1
+            elif char == '[':
+                bracket_depth += 1
+            elif char == ']':
+                bracket_depth -= 1
+            
+            # Check if we've closed the initial block
+            if open_char == '{' and brace_depth == 0:
+                # Found the matching closing brace
+                extracted = text[start_pos:i + 1]
+                # Quick validation: try to parse it
+                if is_valid_json(json_string=extracted):
+                    return extracted
+                # Even if not valid, return it for further repair attempts
+                return extracted
+            elif open_char == '[' and bracket_depth == 0:
+                # Found the matching closing bracket
+                extracted = text[start_pos:i + 1]
+                # Quick validation: try to parse it
+                if is_valid_json(json_string=extracted):
+                    return extracted
+                # Even if not valid, return it for further repair attempts
+                return extracted
+        
+        # If we get here, we didn't find a matching closing brace/bracket
+        # Return None to indicate failure
+        return None
 
     def _preprocess_and_repair_json_text(self, text: str) -> str:
         """Preprocess and repair JSON text by fixing common issues.
