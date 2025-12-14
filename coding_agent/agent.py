@@ -822,8 +822,33 @@ class CodingAgentWorkflow(WorkflowBase):
         if retry_count < config.MAX_RETRY_ATTEMPTS:
             return "retry"
         
-        # Max retries reached - log failed batch and return failure
+        # Max retries reached - log failed batch and set final_output before returning failure
         self._log_failed_batch(state)
+        
+        # Set final_output to indicate failure (BUG FIX: was missing before)
+        node_output = state["node_output"] or {}
+        selected_clusters = node_output.get("selected_clusters", [])
+        cluster_error_indices = node_output.get("cluster_error_indices", {})
+        all_error_indices = [
+            idx
+            for indices in cluster_error_indices.values()
+            for idx in indices
+        ]
+        
+        state["final_output"] = {
+            "success": False,
+            "processed_clusters": selected_clusters,
+            "errors_removed_count": 0,
+            "parser_updated": False,
+            "tests_passed": False,
+            "retry_count": retry_count,
+            "message": f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts.",
+            "test_results": test_results,
+            "cluster_error_indices": cluster_error_indices,
+            "generated_cluster_modules": node_output.get("generated_cluster_modules", {}),
+            "generated_test_files": node_output.get("generated_test_files", {}),
+        }
+        
         return "failure"
     
     def _log_failed_batch(self, state: AnnotationState) -> None:

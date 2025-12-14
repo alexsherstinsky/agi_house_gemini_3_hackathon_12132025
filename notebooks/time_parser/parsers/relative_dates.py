@@ -1,11 +1,11 @@
 # time_parser/parsers/relative_dates.py
-"""Parser module for relative date expressions."""
+"""Parser module for relative_dates cluster."""
 from datetime import datetime, timedelta, UTC
 import re
-from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR, SA, SU
+from dateutil.relativedelta import relativedelta
 
 def parse(text: str) -> datetime | None:
-    """Parse relative date expressions like 'tomorrow', 'next week', 'Monday morning'.
+    """Parse relative date expressions (tomorrow, next week, in N days, Day Time).
     
     Args:
         text: Time expression string to parse
@@ -13,66 +13,63 @@ def parse(text: str) -> datetime | None:
     Returns:
         datetime object with UTC timezone if successful, None otherwise
     """
-    text = text.strip().lower()
-    # Remove trailing punctuation
-    text = re.sub(r'[.,;!]+$', '', text)
+    # Normalize text: remove non-alphanumeric (keep spaces), lower case, strip
+    # This handles punctuation like 'tomorrow!' -> 'tomorrow'
+    clean_text = re.sub(r'[^\w\s]', '', text).strip().lower()
+    # Normalize whitespace to single spaces
+    clean_text = re.sub(r'\s+', ' ', clean_text)
     
     now = datetime.now(UTC)
     
-    # 1. Exact Keywords
-    if text == "tomorrow":
+    # 1. Simple offsets
+    if clean_text == 'tomorrow':
         return now + timedelta(days=1)
     
-    if text == "next week":
+    if clean_text == 'next week':
         return now + timedelta(weeks=1)
-    
-    # 2. 'In N days' pattern
+        
+    # 2. Numeric offsets: "in N days"
     # Matches: "in 2 days", "in 1 day"
-    in_days_match = re.search(r'^in\s+(\d+)\s+days?$', text)
-    if in_days_match:
-        days = int(in_days_match.group(1))
+    numeric_match = re.match(r'^in\s+(\d+)\s+days?$', clean_text)
+    if numeric_match:
+        days = int(numeric_match.group(1))
         return now + timedelta(days=days)
         
-    # 3. 'Day PartOfDay' pattern
-    # Matches: "Monday morning", "Friday afternoon"
-    
-    # Mappings
-    weekdays = {
-        'monday': MO, 'mon': MO,
-        'tuesday': TU, 'tue': TU,
-        'wednesday': WE, 'wed': WE,
-        'thursday': TH, 'thu': TH,
-        'friday': FR, 'fri': FR,
-        'saturday': SA, 'sat': SA,
-        'sunday': SU, 'sun': SU
+    # 3. Weekday + Fuzzy Time: "Monday morning"
+    weekdays_map = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3, 
+        'friday': 4, 'saturday': 5, 'sunday': 6
     }
     
-    parts_of_day = {
-        'morning': 9,    # 09:00
-        'afternoon': 14, # 14:00
-        'evening': 18    # 18:00
+    fuzzy_times_map = {
+        'morning': 9,    # 9 AM
+        'afternoon': 14, # 2 PM
+        'evening': 18    # 6 PM
     }
     
-    day_pattern = '|'.join(weekdays.keys())
-    part_pattern = '|'.join(parts_of_day.keys())
+    days_pattern = '|'.join(weekdays_map.keys())
+    times_pattern = '|'.join(fuzzy_times_map.keys())
     
-    # Regex: (monday|mon) (morning|afternoon...)
-    combo_regex = fr'^({day_pattern})\s+({part_pattern})$'
-    combo_match = re.search(combo_regex, text)
+    # Regex matches "monday morning", "friday afternoon", etc.
+    fuzzy_match = re.match(f'^({days_pattern})\s+({times_pattern})$', clean_text)
     
-    if combo_match:
-        day_str = combo_match.group(1)
-        part_str = combo_match.group(2)
+    if fuzzy_match:
+        day_name = fuzzy_match.group(1)
+        time_name = fuzzy_match.group(2)
         
-        target_weekday = weekdays[day_str]
-        target_hour = parts_of_day[part_str]
+        target_weekday_idx = weekdays_map[day_name]
+        target_hour = fuzzy_times_map[time_name]
         
-        # Logic: Find the *next* occurrence of this day. 
-        # using (+1) ensures we look forward, not current day if match
-        target_date = now + relativedelta(weekday=target_weekday(1))
+        current_weekday_idx = now.weekday()
         
-        # Reset time to the specific part of day
-        result = target_date.replace(hour=target_hour, minute=0, second=0, microsecond=0)
-        return result
-
+        # Calculate days until next occurrence of the weekday
+        days_ahead = target_weekday_idx - current_weekday_idx
+        if days_ahead <= 0:
+            days_ahead += 7
+            
+        target_date = now + timedelta(days=days_ahead)
+        
+        # Return date with specific hour, 0 minutes/seconds
+        return target_date.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+        
     return None
