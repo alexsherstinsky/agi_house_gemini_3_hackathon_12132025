@@ -223,6 +223,12 @@ class LLMJsonParser:
         if is_valid_json(json_string=repaired_text):
             return repaired_text
 
+        # Try repairing unescaped backslashes FIRST (common in regex patterns)
+        # This must come before newline repair to avoid interfering with escape sequences
+        repaired_text = self._repair_unescaped_backslashes(text=repaired_text)
+        if is_valid_json(json_string=repaired_text):
+            return repaired_text
+
         # Try repairing newlines in string values (common in multi-line code strings)
         repaired_text = self._repair_newlines_in_strings(text=repaired_text)
         if is_valid_json(json_string=repaired_text):
@@ -338,6 +344,69 @@ class LLMJsonParser:
         pattern = r'"(?:[^"\\]|\\.)*"'
         
         return re.sub(pattern, escape_newlines_in_match, text)
+
+    def _repair_unescaped_backslashes(self, text: str) -> str:
+        """Repair unescaped backslashes in JSON string values.
+        
+        This handles cases where code strings contain regex patterns like \\s, \\d, \\w
+        which need to be escaped as \\\\s, \\\\d, \\\\w in JSON strings.
+        
+        Args:
+            text: The JSON text to repair.
+            
+        Returns:
+            The repaired JSON text with backslashes properly escaped in string values.
+        """
+        def escape_backslashes_in_match(match):
+            full_match = match.group(0)
+            content_start = 1  # After opening quote
+            content_end = len(full_match) - 1  # Before closing quote
+            if content_end > content_start:
+                content = full_match[content_start:content_end]
+                # Valid JSON escape sequences: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+                valid_escapes = {'"', '\\', '/', 'b', 'f', 'n', 'r', 't'}
+                result = []
+                i = 0
+                while i < len(content):
+                    if content[i] == '\\':
+                        # Check if this is part of a valid JSON escape sequence
+                        if i + 1 < len(content):
+                            next_char = content[i + 1]
+                            # Check for \uXXXX (4 hex digits)
+                            if next_char == 'u' and i + 5 < len(content):
+                                # Check if followed by 4 hex digits
+                                hex_part = content[i + 2:i + 6]
+                                if all(c in '0123456789abcdefABCDEF' for c in hex_part):
+                                    # Valid \uXXXX escape, keep as is
+                                    result.append('\\u' + hex_part)
+                                    i += 6
+                                    continue
+                            # Check for other valid escapes
+                            if next_char in valid_escapes:
+                                # Already properly escaped, keep as is
+                                result.append('\\' + next_char)
+                                i += 2
+                                continue
+                        # Invalid escape sequence (like \s, \d, \w in regex) - escape the backslash
+                        # This converts \s to \\s, \d to \\d, etc.
+                        result.append('\\\\')
+                        # Also include the next character if it exists
+                        if i + 1 < len(content):
+                            result.append(content[i + 1])
+                            i += 2
+                        else:
+                            i += 1
+                    else:
+                        result.append(content[i])
+                        i += 1
+                return '"' + ''.join(result) + '"'
+            return full_match
+        
+        # Match JSON string values: "..." handling escaped quotes and backslashes
+        # This regex matches: " followed by any characters (including escaped ones) until closing "
+        pattern = r'"(?:[^"\\]|\\.)*"'
+        
+        return re.sub(pattern, escape_backslashes_in_match, text)
 
     def _parse_json_or_jsonl(
         self, text: str, fail_fast: bool, tag: str, context: str, debug_logging: bool = False

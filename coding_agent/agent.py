@@ -519,9 +519,14 @@ class CodingAgentWorkflow(WorkflowBase):
                 raise RuntimeError(error_msg) from e
             else:
                 # Log warning and return state with error indicators
+                # Preserve existing code_plan if it exists (so ACT can still use it on retry)
                 logger.warning(error_msg)
                 node_output = state["node_output"] or {}
+                # Preserve code_plan if it already exists (don't clear it on PLAN failure)
+                existing_code_plan = node_output.get("code_plan")
                 node_output["error"] = error_msg
+                if existing_code_plan:
+                    node_output["code_plan"] = existing_code_plan
                 state["node_output"] = node_output
                 return state
     
@@ -589,7 +594,15 @@ class CodingAgentWorkflow(WorkflowBase):
             code_plan = node_output.get("code_plan")
             
             if code_plan is None:
-                raise ValueError("code_plan is None or missing from state")
+                # Check if there's an error indicating PLAN failed - if so, this is a critical failure
+                error = node_output.get("error", "")
+                if "PLAN node failed" in error:
+                    raise ValueError(
+                        f"code_plan is None and PLAN node failed: {error}. "
+                        "Cannot generate code without a plan."
+                    )
+                else:
+                    raise ValueError("code_plan is None or missing from state")
             
             if not code_plan.get("cluster_plans"):
                 raise ValueError("code_plan has no cluster_plans to generate code for")
@@ -817,7 +830,40 @@ class CodingAgentWorkflow(WorkflowBase):
         if test_results.get("all_passed") is True:
             return "success"
         
-        retry_count = state["node_output"].get("retry_count", 0)
+        node_output = state["node_output"] or {}
+        retry_count = node_output.get("retry_count", 0)
+        
+        # Check for critical errors that prevent progress (e.g., ACT node failed or PLAN node failed)
+        critical_error = node_output.get("error")
+        if critical_error:
+            # Check if it's a critical error from ACT or PLAN node
+            is_critical = (
+                "ACT node failed" in critical_error or 
+                "PLAN node failed" in critical_error
+            )
+            
+            if is_critical:
+                # If we've already retried at least once, don't retry again
+                if retry_count >= 1:
+                    # Set final_output and return failure
+                    self._log_failed_batch(state)
+                    selected_clusters = node_output.get("selected_clusters", [])
+                    cluster_error_indices = node_output.get("cluster_error_indices", {})
+                    
+                    state["final_output"] = {
+                        "success": False,
+                        "processed_clusters": selected_clusters,
+                        "errors_removed_count": 0,
+                        "parser_updated": False,
+                        "tests_passed": False,
+                        "retry_count": retry_count,
+                        "message": f"Workflow failed due to critical error: {critical_error}",
+                        "test_results": test_results,
+                        "cluster_error_indices": cluster_error_indices,
+                        "generated_cluster_modules": node_output.get("generated_cluster_modules", {}),
+                        "generated_test_files": node_output.get("generated_test_files", {}),
+                    }
+                    return "failure"
         
         if retry_count < config.MAX_RETRY_ATTEMPTS:
             return "retry"
@@ -826,7 +872,6 @@ class CodingAgentWorkflow(WorkflowBase):
         self._log_failed_batch(state)
         
         # Set final_output to indicate failure (BUG FIX: was missing before)
-        node_output = state["node_output"] or {}
         selected_clusters = node_output.get("selected_clusters", [])
         cluster_error_indices = node_output.get("cluster_error_indices", {})
         all_error_indices = [
@@ -835,6 +880,13 @@ class CodingAgentWorkflow(WorkflowBase):
             for idx in indices
         ]
         
+        # Include error message if present
+        error_message = node_output.get("error", "")
+        if error_message:
+            message = f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts. Error: {error_message}"
+        else:
+            message = f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts."
+        
         state["final_output"] = {
             "success": False,
             "processed_clusters": selected_clusters,
@@ -842,7 +894,7 @@ class CodingAgentWorkflow(WorkflowBase):
             "parser_updated": False,
             "tests_passed": False,
             "retry_count": retry_count,
-            "message": f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts.",
+            "message": message,
             "test_results": test_results,
             "cluster_error_indices": cluster_error_indices,
             "generated_cluster_modules": node_output.get("generated_cluster_modules", {}),
