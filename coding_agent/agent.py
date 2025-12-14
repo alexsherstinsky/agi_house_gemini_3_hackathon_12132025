@@ -792,10 +792,75 @@ class CodingAgentWorkflow(WorkflowBase):
                 state["final_output"] = final_output
                 node_output["errors_removed_count"] = errors_removed_count
                 node_output["parser_reloaded"] = True
+            else:
+                # Tests failed - check if we've reached max retries
+                # Set final_output here to ensure it's persisted (conditional edges may not persist state mutations)
+                logger.debug(f"VALIDATE: Tests failed. retry_count={retry_count}, MAX_RETRY_ATTEMPTS={config.MAX_RETRY_ATTEMPTS}")
+                if retry_count >= config.MAX_RETRY_ATTEMPTS:
+                    # Max retries reached - set final_output
+                    logger.info(f"VALIDATE: Max retries reached ({retry_count} >= {config.MAX_RETRY_ATTEMPTS}). Setting final_output.")
+                    self._log_failed_batch(state)
+                    
+                    selected_clusters = node_output.get("selected_clusters", [])
+                    cluster_error_indices = node_output.get("cluster_error_indices", {})
+                    
+                    # Include error message if present
+                    error_message = node_output.get("error", "")
+                    if error_message:
+                        message = f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts. Error: {error_message}"
+                    else:
+                        message = f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts."
+                    
+                    final_output = {
+                        "success": False,
+                        "processed_clusters": selected_clusters,
+                        "errors_removed_count": 0,
+                        "parser_updated": False,
+                        "tests_passed": False,
+                        "retry_count": retry_count,
+                        "message": message,
+                        "test_results": test_results,
+                        "cluster_error_indices": cluster_error_indices,
+                        "generated_cluster_modules": node_output.get("generated_cluster_modules", {}),
+                        "generated_test_files": node_output.get("generated_test_files", {}),
+                    }
+                    
+                    state["final_output"] = final_output
+                    logger.debug(f"VALIDATE: Set final_output in state. Keys: {list(final_output.keys())}")
+                else:
+                    logger.debug(f"VALIDATE: Not at max retries yet ({retry_count} < {config.MAX_RETRY_ATTEMPTS}). Will retry.")
             
             # Update state
             state["node_output"] = node_output
             
+            # Safety check: If we're at max retries and final_output isn't set, set it now
+            # This ensures final_output is always set even if the condition check above failed
+            if not test_results.get("all_passed") and retry_count >= config.MAX_RETRY_ATTEMPTS:
+                if state.get("final_output") is None:
+                    logger.warning("VALIDATE: final_output was not set in else block, setting it now as fallback")
+                    self._log_failed_batch(state)
+                    selected_clusters = node_output.get("selected_clusters", [])
+                    cluster_error_indices = node_output.get("cluster_error_indices", {})
+                    error_message = node_output.get("error", "")
+                    if error_message:
+                        message = f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts. Error: {error_message}"
+                    else:
+                        message = f"Max retries ({config.MAX_RETRY_ATTEMPTS}) reached. Tests did not pass after {retry_count} attempts."
+                    state["final_output"] = {
+                        "success": False,
+                        "processed_clusters": selected_clusters,
+                        "errors_removed_count": 0,
+                        "parser_updated": False,
+                        "tests_passed": False,
+                        "retry_count": retry_count,
+                        "message": message,
+                        "test_results": test_results,
+                        "cluster_error_indices": cluster_error_indices,
+                        "generated_cluster_modules": node_output.get("generated_cluster_modules", {}),
+                        "generated_test_files": node_output.get("generated_test_files", {}),
+                    }
+            
+            logger.debug(f"VALIDATE: Returning state. final_output is {'set' if state.get('final_output') else 'None'}")
             return state
             
         except Exception as e:
@@ -833,6 +898,15 @@ class CodingAgentWorkflow(WorkflowBase):
         node_output = state["node_output"] or {}
         retry_count = node_output.get("retry_count", 0)
         
+        # If final_output is already set (e.g., by _validate_node), preserve it
+        # Conditional edge functions may not persist state mutations, so we rely on the node to set it
+        if state.get("final_output") is not None:
+            # final_output already set by _validate_node, just return the appropriate edge
+            if retry_count < config.MAX_RETRY_ATTEMPTS:
+                return "retry"
+            else:
+                return "failure"
+        
         # Check for critical errors that prevent progress (e.g., ACT node failed or PLAN node failed)
         critical_error = node_output.get("error")
         if critical_error:
@@ -869,9 +943,11 @@ class CodingAgentWorkflow(WorkflowBase):
             return "retry"
         
         # Max retries reached - log failed batch and set final_output before returning failure
+        # Note: This should rarely be reached if _validate_node properly sets final_output,
+        # but we keep it as a fallback
         self._log_failed_batch(state)
         
-        # Set final_output to indicate failure (BUG FIX: was missing before)
+        # Set final_output to indicate failure (fallback - should already be set by _validate_node)
         selected_clusters = node_output.get("selected_clusters", [])
         cluster_error_indices = node_output.get("cluster_error_indices", {})
         all_error_indices = [

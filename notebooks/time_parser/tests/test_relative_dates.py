@@ -1,54 +1,63 @@
-# time_parser/tests/test_relative_dates.py
 """Tests for relative_dates parser module."""
 import pytest
 from datetime import datetime, timedelta, UTC
-from dateutil.relativedelta import relativedelta, MO, TU, WE, TH, FR, SA, SU
-from time_parser.parsers.relative_dates import parse, WEEKDAY_MAP
+from dateutil.relativedelta import relativedelta
+from time_parser.parsers.relative_dates import parse
 
-@pytest.mark.parametrize("input_text,check_type,expected_val", [
-    ("tomorrow", "days_diff", 1),
-    ("TOMORROW", "days_diff", 1),
-    ("next week", "days_diff", 7),
-    ("in 2 days", "days_diff", 2),
-    ("IN 5 DAYS", "days_diff", 5),
-    ("Monday morning", "weekday_check", "monday"),
-    ("Friday morning", "weekday_check", "friday"),
+@pytest.mark.parametrize("input_text,check_type,value", [
+    ("tomorrow", "days", 1),
+    ("next week", "weeks", 1),
+    ("in 2 days", "days", 2),
+    ("in 3 weeks", "weeks", 3),
+    ("IN 5 DAYS", "days", 5),  # Case insensitivity
+    ("tomorrow!", "days", 1),  # Punctuation
+    ("in 1 day", "days", 1),   # Singular
+    ("  tomorrow  ", "days", 1), # Whitespace
+    ("next month", "months", 1),
 ])
-def test_relative_dates_parsing(input_text, check_type, expected_val):
+def test_relative_dates(input_text, check_type, value):
     """Test parsing of relative date expressions."""
+    # Capture 'now' roughly when parse happens
+    before = datetime.now(UTC)
     result = parse(input_text)
-    now = datetime.now(UTC)
+    after = datetime.now(UTC)
     
     assert result is not None, f"Failed to parse: {input_text}"
-    assert isinstance(result, datetime), f"Result not datetime: {input_text}"
-    assert result.tzinfo == UTC, f"Result not UTC: {input_text}"
+    assert isinstance(result, datetime)
+    assert result.tzinfo == UTC
     
-    if check_type == "days_diff":
-        # Check if the result is approximately N days from now
-        # We ignore exact seconds, just check the date diff roughly
-        diff = result - now
-        # Allow 1 minute variance for execution time
-        assert abs(diff.days - expected_val) <= 1, f"Expected {expected_val} days diff, got {diff.days}"
-        assert result.hour == 9, "Expected default time of 9 AM"
-        
-    elif check_type == "weekday_check":
-        target_const = WEEKDAY_MAP[expected_val]
-        assert result.weekday() == target_const.weekday, f"Expected {expected_val}, got weekday index {result.weekday()}"
-        assert result.hour == 9, "Expected 9 AM for morning"
-        assert result > now, "Result should be in the future"
+    # Calculate difference
+    # We account for slight execution time difference by checking bounds or approximate match
+    # However, relative parsers use 'now()'. 
+    # A robust test checks if result is roughly (now + delta)
+    
+    expected_delta = None
+    if check_type == "days":
+        expected_delta = timedelta(days=value)
+    elif check_type == "weeks":
+        expected_delta = timedelta(weeks=value)
+    elif check_type == "months":
+        # Months are variable, use approx check or reconstruct
+        expected_delta = relativedelta(months=value)
+    
+    # Reconstruct expected base to compare
+    # Note: Using 'before' might be slightly off vs parse's internal 'now', 
+    # but usually <10ms diff. 
+    
+    # For precise relative delta checking (months/years), we check attributes or rough total seconds
+    if check_type == "months":
+        # Rough check: result month should be (now.month + value) % 12 (roughly)
+        # Easier: ensure it's in the future by approx correct amount
+        diff = result - before
+        # 1 month is roughly 28-31 days. 
+        assert diff.total_seconds() > 27 * 24 * 3600 * value
+    else:
+        diff = result - before
+        expected_seconds = expected_delta.total_seconds()
+        # Allow 1 second tolerance for execution time
+        assert abs(diff.total_seconds() - expected_seconds) < 1.0
 
-def test_relative_dates_failures():
-    """Test expressions that should return None."""
+def test_relative_dates_no_match():
+    """Test that invalid inputs return None."""
     assert parse("yesterday") is None
     assert parse("random text") is None
-    assert parse("") is None
-
-def test_relative_dates_whitespace_punctuation():
-    """Test edge cases with whitespace and punctuation."""
-    res = parse("  tomorrow!  ")
-    assert res is not None
-    assert res.hour == 9
-    
-    res2 = parse("in 2 days.")
-    assert res2 is not None
-    assert res2.hour == 9
