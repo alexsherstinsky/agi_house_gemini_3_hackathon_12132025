@@ -731,7 +731,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 14.0 Integration Testing and Refinement [M]
 
-   14.1 **Test complete end-to-end flow** [M]
+   14.1 **Test complete end-to-end flow** [M] ✓
        - Create test error queue with sample errors from `tests/fixtures/follow_up_tasks_202512121435.jsonl`
        - Filter fixture data: Select rows where `deadline_at` is null (these are the parsing failures)
        - Copy selected rows to error_queue.jsonl for testing
@@ -758,6 +758,8 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Test: Error handling works correctly in various failure scenarios
 
 ## Manual Testing Guide
+
+**Primary Manual Test:** Run the complete `notebooks/demo.ipynb` notebook end-to-end. This demonstrates the full self-healing flow from error collection through agent activation to success verification, including both controlled test inputs and real production data validation. The detailed tests below (Test 1-8) are provided as reference for deeper validation if needed.
 
 ### Prerequisites
 
