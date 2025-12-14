@@ -39,7 +39,7 @@ class LLMJsonParser:
 
     def parse_llm_json_extraction_response(
         self,
-        response_content: str,
+        response_content: str | list,
         fail_fast: bool = False,
         context_identifier: tuple[str, str] = ("Context", "unknown"),
         debug_logging: bool = False,
@@ -47,7 +47,7 @@ class LLMJsonParser:
         """Parse LLM JSON extraction response with robust error handling.
 
         Args:
-            response_content: The raw response content from the LLM.
+            response_content: The raw response content from the LLM (can be str or list).
             fail_fast: Whether to fail fast on parsing errors.
             context_identifier: Tuple of (tag, context) for logging.
             debug_logging: Whether to enable debug logging.
@@ -58,6 +58,25 @@ class LLMJsonParser:
         tag: str
         context: str
         tag, context = context_identifier
+
+        # Handle case where response_content is a list (multiple content blocks from LangChain)
+        if isinstance(response_content, list):
+            # Extract text from content blocks (LangChain format: [{'type': 'text', 'text': '...'}])
+            text_parts = []
+            for item in response_content:
+                if isinstance(item, dict) and 'text' in item:
+                    # LangChain content block format
+                    text_parts.append(str(item['text']))
+                elif isinstance(item, str):
+                    # Already a string
+                    text_parts.append(item)
+                else:
+                    # Fallback: convert to string
+                    text_parts.append(str(item))
+            response_content = " ".join(text_parts)
+        elif not isinstance(response_content, str):
+            # Convert to string if it's not already
+            response_content = str(response_content)
 
         # Debug logging: Original response
         if debug_logging:
@@ -106,7 +125,7 @@ class LLMJsonParser:
 
         try:
             return self._parse_json_or_jsonl(
-                text=repaired, fail_fast=fail_fast, tag=tag, context=context
+                text=repaired, fail_fast=fail_fast, tag=tag, context=context, debug_logging=debug_logging
             )
         except ValueError:
             # Let ValueError propagate for fail_fast behavior.
@@ -170,7 +189,113 @@ class LLMJsonParser:
             flags=re.MULTILINE,
         )
 
+        text = text.strip()
+        
+        # If text doesn't start with { or [, try to extract JSON block from within the text
+        # This handles cases where LLMs add explanatory text before the JSON block
+        if text and not (text.startswith('{') or text.startswith('[')):
+            extracted = self._extract_json_block(text)
+            if extracted:
+                text = extracted
+        
         return text.strip()
+
+    def _extract_json_block(self, text: str) -> str | None:
+        """Extract the first JSON block (object or array) from text that may have leading/trailing text.
+        
+        This method finds the first '{' or '[' and extracts the complete JSON block
+        by matching brackets. This is useful when LLMs add explanatory text before
+        or after the JSON block.
+        
+        Args:
+            text: The text that may contain a JSON block.
+            
+        Returns:
+            The extracted JSON block as a string, or None if no valid block is found.
+        """
+        # Find the first opening brace or bracket
+        first_brace = text.find('{')
+        first_bracket = text.find('[')
+        
+        # Determine which comes first and what type of block we're extracting
+        if first_brace == -1 and first_bracket == -1:
+            return None
+        
+        if first_brace == -1:
+            start_pos = first_bracket
+            open_char = '['
+            close_char = ']'
+        elif first_bracket == -1:
+            start_pos = first_brace
+            open_char = '{'
+            close_char = '}'
+        else:
+            # Both found, use whichever comes first
+            if first_brace < first_bracket:
+                start_pos = first_brace
+                open_char = '{'
+                close_char = '}'
+            else:
+                start_pos = first_bracket
+                open_char = '['
+                close_char = ']'
+        
+        # Extract from the opening brace/bracket
+        # Track depth for both braces and brackets to handle nested structures
+        brace_depth = 0
+        bracket_depth = 0
+        in_string = False
+        escape_next = False
+        
+        for i in range(start_pos, len(text)):
+            char = text[i]
+            
+            if escape_next:
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+            
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                continue
+            
+            if in_string:
+                continue
+            
+            # Track both types of brackets/braces for nested structures
+            if char == '{':
+                brace_depth += 1
+            elif char == '}':
+                brace_depth -= 1
+            elif char == '[':
+                bracket_depth += 1
+            elif char == ']':
+                bracket_depth -= 1
+            
+            # Check if we've closed the initial block
+            if open_char == '{' and brace_depth == 0:
+                # Found the matching closing brace
+                extracted = text[start_pos:i + 1]
+                # Quick validation: try to parse it
+                if is_valid_json(json_string=extracted):
+                    return extracted
+                # Even if not valid, return it for further repair attempts
+                return extracted
+            elif open_char == '[' and bracket_depth == 0:
+                # Found the matching closing bracket
+                extracted = text[start_pos:i + 1]
+                # Quick validation: try to parse it
+                if is_valid_json(json_string=extracted):
+                    return extracted
+                # Even if not valid, return it for further repair attempts
+                return extracted
+        
+        # If we get here, we didn't find a matching closing brace/bracket
+        # Return None to indicate failure
+        return None
 
     def _preprocess_and_repair_json_text(self, text: str) -> str:
         """Preprocess and repair JSON text by fixing common issues.
@@ -201,6 +326,17 @@ class LLMJsonParser:
             return repaired_text
 
         repaired_text = self._repair_extra_commas_in_arrays(text=repaired_text)
+        if is_valid_json(json_string=repaired_text):
+            return repaired_text
+
+        # Try repairing unescaped backslashes FIRST (common in regex patterns)
+        # This must come before newline repair to avoid interfering with escape sequences
+        repaired_text = self._repair_unescaped_backslashes(text=repaired_text)
+        if is_valid_json(json_string=repaired_text):
+            return repaired_text
+
+        # Try repairing newlines in string values (common in multi-line code strings)
+        repaired_text = self._repair_newlines_in_strings(text=repaired_text)
         if is_valid_json(json_string=repaired_text):
             return repaired_text
 
@@ -283,8 +419,103 @@ class LLMJsonParser:
         text = re.sub(r",\s*}", "}", text)
         return text
 
+    def _repair_newlines_in_strings(self, text: str) -> str:
+        """Repair literal newlines in JSON string values by escaping them.
+
+        Args:
+            text: The JSON text to repair.
+
+        Returns:
+            The repaired JSON text with newlines escaped in string values.
+        """
+        # Use regex to find and replace newlines inside JSON string values
+        # Pattern matches: "..." where content can contain escaped quotes and characters
+        def escape_newlines_in_match(match):
+            full_match = match.group(0)
+            # Split into opening quote, content, and closing quote
+            # Escape newlines, carriage returns, and tabs in the content (but not in the quotes)
+            # Don't double-escape already escaped sequences
+            content_start = 1  # After opening quote
+            content_end = len(full_match) - 1  # Before closing quote
+            if content_end > content_start:
+                content = full_match[content_start:content_end]
+                # Replace literal newlines with escaped ones, but skip if already escaped
+                # This is a simplified approach - it might double-escape in some edge cases
+                content = content.replace('\r\n', '\\n').replace('\n', '\\n').replace('\r', '\\n').replace('\t', '\\t')
+                return '"' + content + '"'
+            return full_match
+        
+        # Match JSON string values: "..." handling escaped quotes and backslashes
+        # This regex matches: " followed by any characters (including escaped ones) until closing "
+        pattern = r'"(?:[^"\\]|\\.)*"'
+        
+        return re.sub(pattern, escape_newlines_in_match, text)
+
+    def _repair_unescaped_backslashes(self, text: str) -> str:
+        """Repair unescaped backslashes in JSON string values.
+        
+        This handles cases where code strings contain regex patterns like \\s, \\d, \\w
+        which need to be escaped as \\\\s, \\\\d, \\\\w in JSON strings.
+        
+        Args:
+            text: The JSON text to repair.
+            
+        Returns:
+            The repaired JSON text with backslashes properly escaped in string values.
+        """
+        def escape_backslashes_in_match(match):
+            full_match = match.group(0)
+            content_start = 1  # After opening quote
+            content_end = len(full_match) - 1  # Before closing quote
+            if content_end > content_start:
+                content = full_match[content_start:content_end]
+                # Valid JSON escape sequences: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+                valid_escapes = {'"', '\\', '/', 'b', 'f', 'n', 'r', 't'}
+                result = []
+                i = 0
+                while i < len(content):
+                    if content[i] == '\\':
+                        # Check if this is part of a valid JSON escape sequence
+                        if i + 1 < len(content):
+                            next_char = content[i + 1]
+                            # Check for \uXXXX (4 hex digits)
+                            if next_char == 'u' and i + 5 < len(content):
+                                # Check if followed by 4 hex digits
+                                hex_part = content[i + 2:i + 6]
+                                if all(c in '0123456789abcdefABCDEF' for c in hex_part):
+                                    # Valid \uXXXX escape, keep as is
+                                    result.append('\\u' + hex_part)
+                                    i += 6
+                                    continue
+                            # Check for other valid escapes
+                            if next_char in valid_escapes:
+                                # Already properly escaped, keep as is
+                                result.append('\\' + next_char)
+                                i += 2
+                                continue
+                        # Invalid escape sequence (like \s, \d, \w in regex) - escape the backslash
+                        # This converts \s to \\s, \d to \\d, etc.
+                        result.append('\\\\')
+                        # Also include the next character if it exists
+                        if i + 1 < len(content):
+                            result.append(content[i + 1])
+                            i += 2
+                        else:
+                            i += 1
+                    else:
+                        result.append(content[i])
+                        i += 1
+                return '"' + ''.join(result) + '"'
+            return full_match
+        
+        # Match JSON string values: "..." handling escaped quotes and backslashes
+        # This regex matches: " followed by any characters (including escaped ones) until closing "
+        pattern = r'"(?:[^"\\]|\\.)*"'
+        
+        return re.sub(pattern, escape_backslashes_in_match, text)
+
     def _parse_json_or_jsonl(
-        self, text: str, fail_fast: bool, tag: str, context: str
+        self, text: str, fail_fast: bool, tag: str, context: str, debug_logging: bool = False
     ) -> list[dict[str, Any]] | None:
         """Parse JSON or JSONL text with fallback strategies.
 
@@ -297,29 +528,43 @@ class LLMJsonParser:
         Returns:
             List of parsed dictionaries, or None if parsing fails.
         """
-        # First, try full JSON block.
-        if is_valid_json(json_string=text):
-            try:
-                logger.debug(
-                    f"[{tag}] Attempting full JSON block parse (text length: {len(text)} chars)"
-                )
-                parsed: (
-                    dict[str, Any]
-                    | list[dict[str, Any]]
-                    | str
-                    | int
-                    | float
-                    | bool
-                    | None
-                ) = self._json_output_parser.parse(text=text)
-                logger.debug(
-                    f"[{tag}] Full JSON block parse succeeded, type: {type(parsed).__name__}"
-                )
-                return self._normalize_output(parsed=parsed, tag=tag, context=context)
-            except OutputParserException as e:
-                logger.debug(
-                    f"[{tag}] Full block JSON parse failed: {e}. Falling back to JSONL parsing."
-                )
+        # First, try full JSON block - attempt parse even if is_valid_json returns False
+        # (sometimes is_valid_json is too strict, but actual parsing might work)
+        try:
+            logger.debug(
+                f"[{tag}] Attempting full JSON block parse (text length: {len(text)} chars)"
+            )
+            parsed: (
+                dict[str, Any]
+                | list[dict[str, Any]]
+                | str
+                | int
+                | float
+                | bool
+                | None
+            ) = self._json_output_parser.parse(text=text)
+            logger.debug(
+                f"[{tag}] Full JSON block parse succeeded, type: {type(parsed).__name__}"
+            )
+            return self._normalize_output(parsed=parsed, tag=tag, context=context)
+        except OutputParserException as e:
+            # Try direct json.loads as fallback (more lenient than JsonOutputParser)
+            if debug_logging:
+                import json as json_module
+                try:
+                    direct_parsed = json_module.loads(text)
+                    logger.debug(
+                        f"[{tag}] Direct json.loads succeeded, type: {type(direct_parsed).__name__}"
+                    )
+                    return self._normalize_output(parsed=direct_parsed, tag=tag, context=context)
+                except json_module.JSONDecodeError as json_err:
+                    logger.debug(
+                        f"[{tag}] JSON decode error: {json_err.msg} at line {json_err.lineno}, col {json_err.colno}. "
+                        f"Error context: {text[max(0, json_err.pos-50):json_err.pos+50]}"
+                    )
+            logger.debug(
+                f"[{tag}] Full block JSON parse failed: {e}. Falling back to JSONL parsing."
+            )
 
         # Try JSONL (line-delimited).
         logger.debug(

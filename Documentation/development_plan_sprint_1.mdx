@@ -155,21 +155,21 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 1.0 Install Dependencies and Verify Environment [S]
 
-   1.1 **Install project dependencies** [S]
+   1.1 **Install project dependencies** [S] ✓
        - Navigate to project root: `cd agi_house_gemini_3_hackathon_12132025`
        - Run: `pip install -e .` (installs main dependencies including pandas)
        - Optional: Run `pip install -e ".[dev]"` to also install dev dependencies (jupyter, matplotlib, tqdm)
        - Verify all dependencies install correctly (langchain, langchain-google-genai, langgraph, pydantic, pytest, python-dateutil, pandas)
        - Note: This installs from pyproject.toml
 
-   1.2 **Verify GOOGLE_API_KEY environment variable** [S]
+   1.2 **Verify GOOGLE_API_KEY environment variable** [S] ✓
        - Check: `GOOGLE_API_KEY` is set in environment
        - Test: Create simple test script to verify Gemini API access
        - Note: API key should be available before proceeding with LLM integration tasks
 
 ### 2.0 Create TimeParser Class with Dynamic Module Loading [M]
 
-   2.1 **Create TimeParser class** [M]
+   2.1 **Create TimeParser class** [M] ✓
        - File: `time_parser/parser.py`
        - Implement `__init__()`: Initialize `_cluster_parsers` dict and call `_load_cluster_modules()`
        - Implement `_load_cluster_modules()`: Discover all `.py` files in `parsers/` directory, import each module, register `parse()` function
@@ -178,7 +178,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Handle errors gracefully: If a cluster module fails to load, continue with other modules
        - Test: Verify parser loads modules correctly, handles missing modules gracefully
 
-   2.2 **Create initial basic parser for testing** [S]
+   2.2 **Create initial basic parser for testing** [S] ✓
        - Initially, parser should handle basic cases: "asap", "now" (for testing)
        - These can be hardcoded in `parse()` method initially
        - Agent will generate cluster modules later
@@ -186,7 +186,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 3.0 Create Exception Interceptor/Wrapper [M]
 
-   3.1 **Create intercept_parser_errors decorator** [M]
+   3.1 **Create intercept_parser_errors decorator** [M] ✓
        - File: `time_parser/wrapper.py`
        - Implement decorator pattern: `intercept_parser_errors(parser_instance)`
        - Behavior: Catch exceptions from parser, log to error queue (JSONL format), re-raise exception
@@ -196,7 +196,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Use `coding_agent.error_queue.append_error_to_queue()` for logging
        - Test: Verify errors are logged correctly to error_queue.jsonl
 
-   3.2 **Test exception interceptor with TimeParser** [S]
+   3.2 **Test exception interceptor with TimeParser** [S] ✓
        - Create test script that uses wrapped parser
        - Test with inputs that fail parsing
        - Verify errors appear in error_queue.jsonl
@@ -204,7 +204,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 4.0 Implement Prompt Templates [M]
 
-   4.1 **Add REASON node prompt templates** [M]
+   4.1 **Add REASON node prompt templates** [M] ✓
        - File: `coding_agent/prompts.py`
        - Add: `REASON_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.1 of design doc) - constant string
        - Add: `REASON_NODE_USER_PROMPT_TEMPLATE` (from Section 18.1 of design doc) - template with `{error_queue_contents}` placeholder
@@ -212,7 +212,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Note: `{error_queue_contents}` should contain entire content of parsing errors (only rows where parsing failed, i.e., `deadline_at` is null)
        - Test: Verify templates are valid Python strings, can be formatted
 
-   4.2 **Add PLAN node prompt templates** [M]
+   4.2 **Add PLAN node prompt templates** [M] ✓
        - File: `coding_agent/prompts.py`
        - Add: `PLAN_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.2 of design doc) - constant string
        - Add: `PLAN_NODE_USER_PROMPT_TEMPLATE` (from Section 18.2 of design doc) - template with `{cluster_analysis}` and `{existing_cluster_modules}` placeholders
@@ -220,7 +220,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Note: `{cluster_analysis}` is the output from REASON node, `{existing_cluster_modules}` are modules already in `time_parser/parsers/` directory (for context)
        - Test: Verify templates are valid Python strings, can be formatted
 
-   4.3 **Add ACT node prompt templates** [M]
+   4.3 **Add ACT node prompt templates** [M] ✓
        - File: `coding_agent/prompts.py`
        - Add: `ACT_NODE_SYSTEM_PROMPT_TEMPLATE` (from Section 18.3 of design doc) - constant string
        - Add: `ACT_NODE_USER_PROMPT_TEMPLATE` (from Section 18.3 of design doc) - template with `{code_plan}` placeholder
@@ -228,7 +228,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Note: `{code_plan}` is the output from PLAN node
        - Test: Verify templates are valid Python strings, can be formatted
 
-   4.4 **Create helper function to build NodePrompts** [S]
+   4.4 **Create helper function to build NodePrompts** [S] ✓
        - File: `coding_agent/prompts.py`
        - Add function: `build_node_prompts() -> NodePrompts`
        - Function signature: `def build_node_prompts() -> NodePrompts:`
@@ -261,7 +261,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 5.0 Create CodingAgentWorkflow Class Structure [M]
 
-   5.0a **Create cluster ID sanitization helper** [S]
+   5.0a **Create cluster ID sanitization helper** [S] ✓
        - File: `coding_agent/agent.py`
        - Add imports: `import re`, `import keyword`
        - Add function: `_sanitize_cluster_id(cluster_id: str) -> str`
@@ -277,7 +277,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
          9. Return sanitized cluster_id
        - Test: Verify sanitization handles various inputs correctly (spaces, special chars, keywords, empty strings)
 
-   5.1 **Create CodingAgentWorkflow class skeleton** [M]
+   5.1 **Create CodingAgentWorkflow class skeleton** [M] ✓
        - File: `coding_agent/agent.py`
        - Extend `WorkflowBase` from `coding_agent.base`
        - Implement `__init__()`: Accept parameters:
@@ -299,7 +299,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Note: error_queue_path, parsers_dir, tests_dir are instance variables (not stored in state)
        - Test: Verify class can be instantiated
 
-   5.2 **Implement _add_workflow_nodes_and_edges method** [M]
+   5.2 **Implement _add_workflow_nodes_and_edges method** [M] ✓
        - File: `coding_agent/agent.py`
        - Required imports: `from langgraph.graph import END, START, StateGraph` (START and END are constants from langgraph.graph)
        - Add nodes: `workflow.add_node("reason", self._reason_node)`, etc.
@@ -313,7 +313,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Note: `_check_early_exit()` method should return "exit" if `state["node_output"].get("early_exit")` is True, otherwise "continue"
        - Test: Verify workflow graph structure is correct
 
-   5.3 **Implement _check_early_exit helper method** [S]
+   5.3 **Implement _check_early_exit helper method** [S] ✓
        - File: `coding_agent/agent.py`
        - Method signature: `def _check_early_exit(self, state: AnnotationState) -> str:`
        - Check if early exit flag is set: `if state["node_output"].get("early_exit") is True:`
@@ -323,7 +323,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 6.0 Implement REASON Node [M]
 
-   6.1 **Implement _reason_node method** [M]
+   6.1 **Implement _reason_node method** [M] ✓
        - File: `coding_agent/agent.py`
        - Method signature: `def _reason_node(self, state: AnnotationState) -> AnnotationState:`
        - Read full error queue using `coding_agent.error_queue.read_error_queue(self._error_queue_path)` - store as `all_errors`
@@ -372,7 +372,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 7.0 Implement PLAN Node [M]
 
-   7.1 **Implement _plan_node method** [M]
+   7.1 **Implement _plan_node method** [M] ✓
        - File: `coding_agent/agent.py`
        - Method signature: `def _plan_node(self, state: AnnotationState) -> AnnotationState:`
        - Read existing cluster modules from parsers_dir: List `.py` files (excluding `__init__.py`), read each file, extract brief description
@@ -416,7 +416,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 8.0 Implement ACT Node [M]
 
-   8.1 **Implement _act_node method** [M]
+   8.1 **Implement _act_node method** [M] ✓
        - File: `coding_agent/agent.py`
        - Method signature: `def _act_node(self, state: AnnotationState) -> AnnotationState:`
        - Check for early exit: If `state["node_output"].get("early_exit")` is True, return state unchanged (workflow will route to END)
@@ -465,7 +465,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Error handling: If any step fails (LLM call, JSON parsing, file writing), log error and either raise exception (if fail_fast=True) or log warning and return state with error indicators (if fail_fast=False)
        - Test: Verify ACT node generates and writes files correctly with mock LLM response
 
-   8.2 **Add file writing helper with locking** [S]
+   8.2 **Add file writing helper with locking** [S] ✓
        - File: `coding_agent/agent.py`
        - Add function: `_write_file_with_lock(file_path: Path, content: str) -> None`
        - Required imports: `import fcntl`, `import os`, `import time`
@@ -486,7 +486,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 9.0 Implement VALIDATE Node [M]
 
-   9.1 **Implement _validate_node method** [M]
+   9.1 **Implement _validate_node method** [M] ✓
        - File: `coding_agent/agent.py`
        - Method signature: `def _validate_node(self, state: AnnotationState) -> AnnotationState:`
        - Use `coding_agent.test_runner.run_pytest(self._tests_dir)` to run tests
@@ -510,7 +510,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Error handling: If pytest execution fails with exception, catch it, log error, set test_results with all_passed=False, and either raise (if fail_fast=True) or continue (if fail_fast=False)
        - Test: Verify VALIDATE node runs pytest and parses results correctly
 
-   9.2 **Implement _should_retry method** [S]
+   9.2 **Implement _should_retry method** [S] ✓
        - File: `coding_agent/agent.py`
        - Method signature: `def _should_retry(self, state: AnnotationState) -> str:`
        - Get test_results: `test_results = state["node_output"].get("test_results", {})`
@@ -521,7 +521,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Otherwise, call `self._log_failed_batch(state)` and return "failure"
        - Test: Verify retry logic works correctly for all scenarios
 
-   9.3 **Implement _log_failed_batch method** [S]
+   9.3 **Implement _log_failed_batch method** [S] ✓
        - File: `coding_agent/agent.py`
        - Method signature: `def _log_failed_batch(self, state: AnnotationState) -> None:`
        - Get data from state: `selected_clusters = state["node_output"].get("selected_clusters", [])`, `test_results = state["node_output"].get("test_results", {})`, `retry_count = state["node_output"].get("retry_count", 0)`, `cluster_error_indices = state["node_output"].get("cluster_error_indices", {})`
@@ -537,7 +537,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 10.0 Implement Queue Cleanup and Module Reloading [M]
 
-   10.1 **Add queue cleanup after successful validation** [M]
+   10.1 **Add queue cleanup after successful validation** [M] ✓
        - File: `coding_agent/agent.py`
        - Note: This is called from VALIDATE node (Task 9.1) after tests pass, before creating final_output
        - Collect error indices from `state["node_output"]["cluster_error_indices"]`
@@ -549,7 +549,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Note: Error indices are tracked through the workflow - REASON node maps filtered indices to global indices and stores in `cluster_error_indices` dict
        - Test: Verify processed errors are removed from queue correctly
 
-   10.1a **Add file locking to queue cleanup operations** [S]
+   10.1a **Add file locking to queue cleanup operations** [S] ✓
        - File: `coding_agent/error_queue.py`
        - Note: This task MODIFIES existing functions `remove_processed_cluster_errors()` and `append_error_to_queue()` in `error_queue.py` (they currently don't have locking)
        - Required imports: `import fcntl`, `import os`, `import time`
@@ -576,7 +576,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Error handling: If lock acquisition fails, retry up to 3 times with 0.1s delay (`time.sleep(0.1)`), then raise IOError
        - Test: Verify queue operations work correctly with locking, no race conditions
 
-   10.2 **Add module reloading after successful validation** [S]
+   10.2 **Add module reloading after successful validation** [S] ✓
        - File: `coding_agent/agent.py`
        - Note: This is called from VALIDATE node (Task 9.1) after queue cleanup, before creating final_output
        - Call `coding_agent.reloader.reload_parser(self._parsers_dir)` to reload all cluster modules
@@ -588,7 +588,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 11.0 Create LLM Output Parsing Utilities [M]
 
-   11.1 **Create llm_output_parsing_util.py** [M]
+   11.1 **Create llm_output_parsing_util.py** [M] ✓
        - File: `utils/llm_output_parsing_util.py`
        - Required imports: `import logging` (for warnings), `from typing import Any`
        - Add helper functions to extract structured data from parsed JSON responses (from `llm_json_parser.parse_llm_json_extraction_response()`)
@@ -634,20 +634,20 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 12.0 Create Test Infrastructure [M]
 
-   12.1 **Create test utilities** [S]
+   12.1 **Create test utilities** [S] ✓
        - File: `time_parser/tests/test_utils.py`
        - Add function: `assert_valid_datetime(result: datetime | None, input_text: str) -> None`
        - Assertions: result is not None, is datetime instance, has timezone, is UTC
        - Test: Verify utility function works correctly
 
-   12.2 **Create shared pytest fixtures** [S]
+   12.2 **Create shared pytest fixtures** [S] ✓
        - File: `time_parser/tests/conftest.py`
        - Add fixture: `parser()` that returns TimeParser instance
        - Test: Verify fixture works in pytest
 
 ### 13.0 Create Demo Jupyter Notebook [M]
 
-   13.1 **Create notebook structure** [M]
+   13.1 **Create notebook structure** [M] ✓
        - File: `notebooks/demo.ipynb`
        - Follow style of reference_notebook.ipynb (path setup, imports, logging configuration)
        - Add cells for: imports, path setup, logging, Gemini LLM initialization
@@ -657,7 +657,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Temperature: 0.2, max_tokens: 8192
        - Test: Verify notebook runs without errors
 
-   13.1a **Add problem demonstration with fixture data** [S]
+   13.1a **Add problem demonstration with fixture data** [S] ✓
        - File: `notebooks/demo.ipynb`
        - Add cell: Load fixture file using pandas: `pd.read_json('tests/fixtures/follow_up_tasks_202512121435.jsonl', lines=True)`
        - Add cell: Display sample rows showing the problem:
@@ -667,14 +667,14 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Add explanatory text: "This demonstrates the problem - some timing descriptions fail to parse (deadline_at is null), while others succeed"
        - Test: Verify fixture file loads correctly and display shows both error and success cases
 
-   13.2 **Add initial parser state demonstration** [S]
+   13.2 **Add initial parser state demonstration** [S] ✓
        - File: `notebooks/demo.ipynb`
        - Cell: Show initial TimeParser implementation
        - Cell: Show empty parsers/ directory
        - Cell: Test parser with basic inputs ("asap", "now")
        - Test: Verify cells execute correctly
 
-   13.3 **Add error collection demonstration** [M]
+   13.3 **Add error collection demonstration** [M] ✓
        - File: `notebooks/demo.ipynb`
        - Cell: Wrap parser with exception interceptor
        - Cell: Test parser with various inputs that will fail
@@ -682,7 +682,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Cell: Show clustering preview (what REASON node will do)
        - Test: Verify errors are collected and displayed
 
-   13.4 **Add agent activation demonstration** [M]
+   13.4 **Add agent activation demonstration** [M] ✓
        - File: `notebooks/demo.ipynb`
        - Cell: Check error count threshold (use `coding_agent.error_queue.get_error_count()`)
        - Cell: Build NodePrompts using `build_node_prompts()` function:
@@ -721,7 +721,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Note: `workflow.run()` returns `final_state["final_output"] or {}` - see design doc Section 4.2 for exact structure
        - Test: Verify agent runs successfully
 
-   13.5 **Add success verification demonstration** [S]
+   13.5 **Add success verification demonstration** [S] ✓
        - File: `notebooks/demo.ipynb`
        - Cell: Reload parser after agent update
        - Cell: Test parser with previously failing inputs
@@ -731,7 +731,7 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
 
 ### 14.0 Integration Testing and Refinement [M]
 
-   14.1 **Test complete end-to-end flow** [M]
+   14.1 **Test complete end-to-end flow** [M] ✓
        - Create test error queue with sample errors from `tests/fixtures/follow_up_tasks_202512121435.jsonl`
        - Filter fixture data: Select rows where `deadline_at` is null (these are the parsing failures)
        - Copy selected rows to error_queue.jsonl for testing
@@ -758,6 +758,8 @@ This sprint implements a self-healing time parser system that uses an LLM-based 
        - Test: Error handling works correctly in various failure scenarios
 
 ## Manual Testing Guide
+
+**Primary Manual Test:** Run the complete `notebooks/demo.ipynb` notebook end-to-end. This demonstrates the full self-healing flow from error collection through agent activation to success verification, including both controlled test inputs and real production data validation. The detailed tests below (Test 1-8) are provided as reference for deeper validation if needed.
 
 ### Prerequisites
 
