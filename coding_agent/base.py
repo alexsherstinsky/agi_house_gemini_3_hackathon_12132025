@@ -39,8 +39,10 @@ class RateLimitingConfig(BaseModel):
     """Configuration for rate limiting between LLM calls."""
 
     sleep_between_calls: bool = False
-    min_delay: int = 13
-    max_delay: int = 26
+    # min_delay: int = 13
+    # max_delay: int = 26
+    min_delay: int = 3
+    max_delay: int = 8
     jitter_percent: float = 0.1
 
     def should_sleep(self) -> bool:

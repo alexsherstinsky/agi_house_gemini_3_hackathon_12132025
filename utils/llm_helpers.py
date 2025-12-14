@@ -80,8 +80,21 @@ def call_llm_with_prompt(
         # Handle different response types for logging.
         response_content: str
         if hasattr(response, "content"):
-            # Regular AIMessage response.
-            response_content = response.content
+            # Regular AIMessage response - may be str or list
+            raw_content = response.content
+            if isinstance(raw_content, list):
+                # Extract text from LangChain content blocks
+                text_parts = []
+                for item in raw_content:
+                    if isinstance(item, dict) and 'text' in item:
+                        text_parts.append(str(item['text']))
+                    elif isinstance(item, str):
+                        text_parts.append(item)
+                    else:
+                        text_parts.append(str(item))
+                response_content = " ".join(text_parts)
+            else:
+                response_content = str(raw_content)
         else:
             # Pydantic object response from structured output.
             response_content = str(response)

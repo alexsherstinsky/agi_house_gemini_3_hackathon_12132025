@@ -61,8 +61,19 @@ class LLMJsonParser:
 
         # Handle case where response_content is a list (multiple content blocks from LangChain)
         if isinstance(response_content, list):
-            # Join list items into a single string
-            response_content = " ".join(str(item) for item in response_content)
+            # Extract text from content blocks (LangChain format: [{'type': 'text', 'text': '...'}])
+            text_parts = []
+            for item in response_content:
+                if isinstance(item, dict) and 'text' in item:
+                    # LangChain content block format
+                    text_parts.append(str(item['text']))
+                elif isinstance(item, str):
+                    # Already a string
+                    text_parts.append(item)
+                else:
+                    # Fallback: convert to string
+                    text_parts.append(str(item))
+            response_content = " ".join(text_parts)
         elif not isinstance(response_content, str):
             # Convert to string if it's not already
             response_content = str(response_content)
