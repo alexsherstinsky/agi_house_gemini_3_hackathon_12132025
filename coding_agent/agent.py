@@ -262,6 +262,13 @@ class CodingAgentWorkflow(WorkflowBase):
             )
             
             if parsed_response is None or len(parsed_response) == 0:
+                # Log the actual response for debugging
+                response_str = str(response.content) if not isinstance(response.content, str) else response.content
+                logger.error(
+                    f"REASON node LLM response parsing failed. Response type: {type(response.content)}, "
+                    f"Response length: {len(response_str) if isinstance(response_str, str) else 'N/A'}, "
+                    f"Response preview: {response_str[:500] if isinstance(response_str, str) else response_str}"
+                )
                 raise ValueError("REASON node LLM response parsing failed")
             
             # Extract data using helper function
