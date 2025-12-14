@@ -125,7 +125,7 @@ class LLMJsonParser:
 
         try:
             return self._parse_json_or_jsonl(
-                text=repaired, fail_fast=fail_fast, tag=tag, context=context
+                text=repaired, fail_fast=fail_fast, tag=tag, context=context, debug_logging=debug_logging
             )
         except ValueError:
             # Let ValueError propagate for fail_fast behavior.
@@ -340,7 +340,7 @@ class LLMJsonParser:
         return re.sub(pattern, escape_newlines_in_match, text)
 
     def _parse_json_or_jsonl(
-        self, text: str, fail_fast: bool, tag: str, context: str
+        self, text: str, fail_fast: bool, tag: str, context: str, debug_logging: bool = False
     ) -> list[dict[str, Any]] | None:
         """Parse JSON or JSONL text with fallback strategies.
 
