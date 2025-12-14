@@ -39,7 +39,7 @@ class LLMJsonParser:
 
     def parse_llm_json_extraction_response(
         self,
-        response_content: str,
+        response_content: str | list,
         fail_fast: bool = False,
         context_identifier: tuple[str, str] = ("Context", "unknown"),
         debug_logging: bool = False,
@@ -47,7 +47,7 @@ class LLMJsonParser:
         """Parse LLM JSON extraction response with robust error handling.
 
         Args:
-            response_content: The raw response content from the LLM.
+            response_content: The raw response content from the LLM (can be str or list).
             fail_fast: Whether to fail fast on parsing errors.
             context_identifier: Tuple of (tag, context) for logging.
             debug_logging: Whether to enable debug logging.
@@ -58,6 +58,14 @@ class LLMJsonParser:
         tag: str
         context: str
         tag, context = context_identifier
+
+        # Handle case where response_content is a list (multiple content blocks from LangChain)
+        if isinstance(response_content, list):
+            # Join list items into a single string
+            response_content = " ".join(str(item) for item in response_content)
+        elif not isinstance(response_content, str):
+            # Convert to string if it's not already
+            response_content = str(response_content)
 
         # Debug logging: Original response
         if debug_logging:
